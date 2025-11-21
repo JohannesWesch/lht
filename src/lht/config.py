@@ -6,6 +6,7 @@ from YAML files, so you can keep experiments reproducible.
 """
 
 from dataclasses import dataclass
+from typing import List, Optional
 
 import yaml
 
@@ -15,9 +16,7 @@ class ModelConfig:
     vocab_size: int
     d_model: int
     n_heads: int
-    n_layers_local: int
-    n_layers_mid: int
-    n_layers_global: int
+    num_layers: int  # total number of transformer layers
     d_ff: int
     dropout: float
     max_seq_len: int
@@ -25,18 +24,30 @@ class ModelConfig:
 
 
 @dataclass
-class RouterLevelConfig:
-    target_head_ratio: float
-    loss_weight: float
+class HierarchyLevelConfig:
+    """Config for a single level of the learned hierarchy."""
+
+    name: str  # e.g., "sentence", "paragraph", "section"
+    at_layer: int  # which layer to run this router after (1-indexed)
+    target_head_ratio: float  # target proportion of head tokens
+    loss_weight: float  # weight for ratio loss
 
 
 @dataclass
 class RouterConfig:
+    """Config for the router network architecture."""
+
     hidden_dim: int
     window_size: int
     use_gumbel_ste: bool
-    token_to_sentence: RouterLevelConfig
-    sentence_to_section: RouterLevelConfig
+
+
+@dataclass
+class HierarchyConfig:
+    """Config for the full learned hierarchy (K levels)."""
+
+    levels: List[HierarchyLevelConfig]  # K abstraction levels
+    router: RouterConfig  # shared router architecture
 
 
 @dataclass
@@ -61,17 +72,20 @@ class TrainingConfig:
     save_every: int
     eval_every: int
     mixed_precision: str
+    mlm_probability: float = 0.15
 
 
 @dataclass
 class DataConfig:
-    dataset_name: str
     text_column: str
     num_workers: int
     shuffle_buffer_size: int
     max_seq_len: int
     tokenizer_name_or_path: str
     pretokenized: bool = False
+    sources: Optional[List[str]] = None
+    sampling_probs: Optional[List[float]] = None
+    dataset_name: Optional[str] = None  # for backward compatibility
 
 
 @dataclass
@@ -80,7 +94,7 @@ class ExperimentConfig:
     seed: int
     device: str
     model: ModelConfig
-    router: RouterConfig
+    hierarchy: HierarchyConfig
     attention: AttentionConfig
     training: TrainingConfig
     data: DataConfig
@@ -91,21 +105,18 @@ def load_config(path: str) -> ExperimentConfig:
     with open(path, "r") as f:
         raw = yaml.safe_load(f)
 
-    # Minimal, direct mapping; you can make this more robust later.
+    # Parse hierarchy levels
+    hierarchy_raw = raw["hierarchy"]
+    levels = [HierarchyLevelConfig(**lvl) for lvl in hierarchy_raw["levels"]]
+    router_cfg = RouterConfig(**hierarchy_raw["router"])
+    hierarchy = HierarchyConfig(levels=levels, router=router_cfg)
+
     return ExperimentConfig(
         experiment_name=raw["experiment_name"],
         seed=raw["seed"],
         device=raw["device"],
         model=ModelConfig(**raw["model"]),
-        router=RouterConfig(
-            hidden_dim=raw["router"]["hidden_dim"],
-            window_size=raw["router"]["window_size"],
-            use_gumbel_ste=raw["router"]["use_gumbel_ste"],
-            token_to_sentence=RouterLevelConfig(**raw["router"]["token_to_sentence"]),
-            sentence_to_section=RouterLevelConfig(
-                **raw["router"]["sentence_to_section"]
-            ),
-        ),
+        hierarchy=hierarchy,
         attention=AttentionConfig(**raw["attention"]),
         training=TrainingConfig(**raw["training"]),
         data=DataConfig(**raw["data"]),

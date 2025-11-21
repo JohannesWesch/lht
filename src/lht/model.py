@@ -1,11 +1,11 @@
 """
-Core LHT encoder architecture.
+Core LHT encoder architecture with schedule-driven hierarchy.
 
-This module defines LHTEncoder, which wires together:
-- local token layers (sliding window),
-- routers for token→sentence and sentence→section,
-- mid-level sentence-aware layers,
-- global hierarchical layers with HDT-style child/parent/neighbour masks.
+This module defines LHTEncoder with:
+- Single stack of transformer layers (no hard-coded local/mid/global)
+- Schedule-driven router placement (configured via at_layer)
+- Dynamic attention bias selection based on current hierarchy depth
+- Support for arbitrary K-level hierarchies
 """
 
 from typing import Dict, Optional
@@ -18,15 +18,19 @@ from .attention_masks import (
     SentenceAwareBias,
     build_local_attention_bias,
 )
-from .routers import SentenceToSectionRouter, TokenToSentenceRouter
+from .hierarchy import HierarchyManager
 
 
 class LHTEncoder(nn.Module):
     """
-    Learned Hierarchical Transformer encoder.
+    Learned Hierarchical Transformer encoder with flexible architecture.
+
+    Unlike fixed "local → mid → global" stages, uses a single layer stack
+    with schedule-driven router placement. The at_layer config determines
+    when each router fires, making the architecture fully flexible.
 
     Input: token ids [B, N]
-    Output: contextual representations [B, N, D] + router diagnostics.
+    Output: contextual representations [B, N, D] + hierarchy state
     """
 
     def __init__(
@@ -40,15 +44,77 @@ class LHTEncoder(nn.Module):
         self.token_embed = nn.Embedding(config.vocab_size, config.d_model)
         self.pos_embed = None  # you may use RoPE instead of absolute embeddings
 
-        # Local / mid / global transformers: you'll define actual blocks later.
-        self.local_layers = nn.ModuleList()
-        self.mid_layers = nn.ModuleList()
-        self.global_layers = nn.ModuleList()
-        # TODO: construct Transformer blocks here.
+        # Single stack of transformer layers (no local/mid/global separation)
+        self.layers = nn.ModuleList()
+        # TODO: construct actual Transformer blocks
+        # For now, empty list - will be filled when implementing blocks
+        # Example:
+        # self.layers = nn.ModuleList([
+        #     LHTTransformerBlock(config.d_model, config.n_heads,
+        #                         config.d_ff, config.dropout)
+        #     for _ in range(config.num_layers)
+        # ])
 
-        # Routers
-        self.router_tok2sent = TokenToSentenceRouter(config.router, config.d_model)
-        self.router_sent2sec = SentenceToSectionRouter(config.router, config.d_model)
+        # Hierarchy Manager: handles K abstraction levels
+        self.hierarchy_mgr = HierarchyManager(config.hierarchy, config.d_model)
+        self.num_levels = self.hierarchy_mgr.num_levels
+
+        # Build router schedule: which layer triggers which router
+        self.router_schedule = {
+            lvl_cfg.at_layer: level_idx + 1
+            for level_idx, lvl_cfg in enumerate(config.hierarchy.levels)
+        }
+
+    def _pick_bias_for_layer(
+        self,
+        layer_idx: int,
+        hier_state: Dict,
+        seq_len: int,
+        device: torch.device,
+    ):
+        """
+        Dynamically select attention bias based on current hierarchy depth.
+
+        Before any routers: local window attention
+        After 1st router: sentence-aware attention
+        After 2+ routers: full hierarchical attention
+
+        Args:
+            layer_idx: current layer index (1-indexed)
+            hier_state: current hierarchy state
+            seq_len: sequence length
+            device: torch device
+
+        Returns:
+            AttentionBias object for this layer
+        """
+        level_ids = hier_state.get("level_ids", {})
+        is_heads = hier_state.get("is_heads", {})
+        num_levels_so_far = len(level_ids)
+
+        if num_levels_so_far == 0:
+            # Before first router → local window attention
+            return build_local_attention_bias(
+                seq_len=seq_len,
+                window_size=self.cfg.attention.local_window_tokens,
+                device=device,
+            )
+        elif num_levels_so_far == 1:
+            # After first router only → sentence-aware attention
+            return SentenceAwareBias(
+                token2sent=level_ids[1],
+                is_sent_head=is_heads[1],
+                use_doc_token=self.cfg.attention.use_doc_token,
+            )
+        else:
+            # After 2+ routers → full hierarchical attention
+            return HierarchicalBias(
+                level_ids=list(level_ids.values()),
+                is_heads=list(is_heads.values()),
+                use_doc_token=self.cfg.attention.use_doc_token,
+                neighbour_sentences=self.cfg.attention.neighbour_sentences,
+                neighbour_sections=self.cfg.attention.neighbour_sections,
+            )
 
     def forward(
         self,
@@ -56,61 +122,70 @@ class LHTEncoder(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
-        Forward pass through the full LHT encoder.
+        Schedule-driven forward pass through LHT encoder.
 
-        Returns a dict with:
-          - "hidden": final hidden states [B, N, D]
-          - router outputs / diagnostics / loss terms (to be used in training loop)
+        The pass is controlled entirely by config:
+        - Total layers from config.model.num_layers
+        - Router placement from config.hierarchy.levels[*].at_layer
+        - Attention bias chosen dynamically based on hierarchy depth
+
+        Returns:
+            dict with:
+                - "hidden": final hidden states [B, N, D]
+                - "hierarchy": full hierarchy state
+                - "router_ratio_loss": sum of all ratio losses
         """
+        B, N = input_ids.shape
+        device = input_ids.device
+
+        if attention_mask is None:
+            attention_mask = (input_ids != 0).long()
+
         x = self.token_embed(input_ids)  # [B, N, D]
 
-        # ------ Local layers (1–3): sliding window -------
-        local_bias = build_local_attention_bias(
-            seq_len=x.size(1),
-            window_size=self.cfg.attention.local_window_tokens,
-            device=x.device,
-        )
-        for layer in self.local_layers:
-            x = layer(x, attn_bias=local_bias, attention_mask=attention_mask)
+        # Initialize empty hierarchy state
+        hier_state = {
+            "level_ids": {},
+            "is_heads": {},
+            "ratio_losses": {},
+        }
 
-        # ------ Router 1: token -> sentence -------
-        router1_out = self.router_tok2sent(x, attention_mask=attention_mask)
-        token2sent = router1_out["token2sent"]
-        is_sent_head = router1_out["is_sent_head"]
+        # Process through all layers with schedule-driven routing
+        for layer_idx in range(1, self.cfg.model.num_layers + 1):
+            # 1) Choose attention bias for this layer
+            _attn_bias = self._pick_bias_for_layer(
+                layer_idx=layer_idx,
+                hier_state=hier_state,
+                seq_len=N,
+                device=device,
+            )
 
-        # ------ Mid layers (4–6): sentence-aware masking -------
-        sent_bias = SentenceAwareBias(
-            token2sent=token2sent,
-            is_sent_head=is_sent_head,
-            use_doc_token=self.cfg.attention.use_doc_token,
-        )
-        for layer in self.mid_layers:
-            x = layer(x, attn_bias=sent_bias, attention_mask=attention_mask)
+            # 2) Run transformer block
+            # TODO: Implement actual transformer blocks
+            # For now, skip since layers list is empty
+            # x = self.layers[layer_idx - 1](x, attn_bias=_attn_bias,
+            #                                 attention_mask=attention_mask)
 
-        # ------ Router 2: sentence -> section -------
-        router2_out = self.router_sent2sec(
-            x,
-            token2sent=token2sent,
-            is_sent_head=is_sent_head,
-        )
-        token2sec = router2_out["token2sec"]
-        is_sec_head = router2_out["is_sec_head"]
+            # 3) Check if router should fire after this layer
+            if layer_idx in self.router_schedule:
+                target_level = self.router_schedule[layer_idx]
+                hier_state = self.hierarchy_mgr.update_single_level(
+                    hidden=x,
+                    attention_mask=attention_mask,
+                    target_level=target_level,
+                    state=hier_state,
+                )
 
-        # ------ Global layers (7–12): hierarchical masking -------
-        hier_bias = HierarchicalBias(
-            token2sent=token2sent,
-            token2sec=token2sec,
-            is_sent_head=is_sent_head,
-            is_sec_head=is_sec_head,
-            use_doc_token=self.cfg.attention.use_doc_token,
-            neighbour_sentences=self.cfg.attention.neighbour_sentences,
-            neighbour_sections=self.cfg.attention.neighbour_sections,
+        # Aggregate losses
+        ratio_losses = list(hier_state["ratio_losses"].values())
+        router_ratio_loss = (
+            torch.stack(ratio_losses).sum()
+            if ratio_losses
+            else torch.tensor(0.0, device=device)
         )
-        for layer in self.global_layers:
-            x = layer(x, attn_bias=hier_bias, attention_mask=attention_mask)
 
         return {
             "hidden": x,
-            "router_tok2sent": router1_out,
-            "router_sent2sec": router2_out,
+            "hierarchy": hier_state,
+            "router_ratio_loss": router_ratio_loss,
         }

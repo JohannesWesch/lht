@@ -83,38 +83,41 @@ class SentenceAwareBias(AttentionBias):
 
 class HierarchicalBias(AttentionBias):
     """
-    Full HDT-style hierarchical attention.
+    Generic HDT-style hierarchical attention for K abstraction levels.
 
-    Encodes:
-    - token -> sentence (children/parent/neighbours),
-    - token -> section,
-    - sentence head -> section head,
-    - section head -> [DOC].
+    Encodes child/parent/sibling relationships across arbitrary hierarchy depth:
+    - 2 levels: tokens ↔ sentences ↔ [DOC]
+    - 3 levels: tokens ↔ sentences ↔ sections ↔ [DOC]
+    - 4 levels: tokens ↔ sentences ↔ paragraphs ↔ sections ↔ [DOC]
+    - etc.
 
-    token2sent: [B, N]
-    token2sec: [B, N]
-    is_sent_head: [B, N]
-    is_sec_head: [B, N]
+    level_ids: List of [B, N] tensors, one per level ℓ = 1..K
+    is_heads: List of [B, N] tensors, head flags per level
     """
 
     def __init__(
         self,
-        token2sent: torch.Tensor,
-        token2sec: torch.Tensor,
-        is_sent_head: torch.Tensor,
-        is_sec_head: torch.Tensor,
+        level_ids: list,  # List[Tensor[B, N]] of length K
+        is_heads: list,  # List[Tensor[B, N]] of length K
         use_doc_token: bool,
-        neighbour_sentences: int,
-        neighbour_sections: int,
+        neighbour_sentences: int = 1,
+        neighbour_sections: int = 1,
     ) -> None:
         super().__init__()
-        self.token2sent = token2sent
-        self.token2sec = token2sec
-        self.is_sent_head = is_sent_head
-        self.is_sec_head = is_sec_head
+        self.level_ids = level_ids  # level_ids[ℓ] for ℓ = 0..K-1
+        self.is_heads = is_heads  # is_heads[ℓ] for ℓ = 0..K-1
+        self.num_levels = len(level_ids)
         self.use_doc_token = use_doc_token
         self.neighbour_sentences = neighbour_sentences
         self.neighbour_sections = neighbour_sections
+
+        # Backward compatibility: expose first two levels with old names
+        if self.num_levels >= 1:
+            self.token2sent = level_ids[0]
+            self.is_sent_head = is_heads[0]
+        if self.num_levels >= 2:
+            self.token2sec = level_ids[1]
+            self.is_sec_head = is_heads[1]
 
     def materialize(
         self,
@@ -124,29 +127,39 @@ class HierarchicalBias(AttentionBias):
     ) -> torch.Tensor:
         """
         Returns a bias tensor implementing the child/parent/sibling attention
-        pattern. This is where you reproduce HDT-like semantics.
+        pattern for arbitrary K levels.
+
+        For each level ℓ = 1..K:
+        - Child edges: tokens in same unit at level ℓ
+        - Parent edges: tokens to their head at level ℓ
+        - Sibling edges: units that share a parent at level ℓ+1
+
+        This is the generic HDT-like pattern.
         """
         _B, Nq, Nk = shape[-3], shape[-2], shape[-1]
-        device = device or self.token2sent.device
+        device = device or self.level_ids[0].device
         dtype = dtype or torch.float32
 
-        token2sent = self.token2sent.to(device)
-        token2sec = self.token2sec.to(device)
+        # Start with no edges allowed
+        mask = torch.zeros((shape[-3], Nq, Nk), dtype=torch.bool, device=device)
 
-        # Basic same-sentence baseline.
-        q_sent = token2sent[:, :Nq].unsqueeze(-1)  # [B, Nq, 1]
-        k_sent = token2sent[:, :Nk].unsqueeze(-2)  # [B, 1, Nk]
-        same_sent = q_sent == k_sent  # [B, Nq, Nk]
+        # Add edges for each level in the hierarchy
+        for level_idx, level_id in enumerate(self.level_ids):
+            level_id = level_id.to(device)
 
-        # Same-section baseline.
-        q_sec = token2sec[:, :Nq].unsqueeze(-1)
-        k_sec = token2sec[:, :Nk].unsqueeze(-2)
-        same_sec = q_sec == k_sec
+            # Same-unit edges at this level (children)
+            q_level = level_id[:, :Nq].unsqueeze(-1)  # [B, Nq, 1]
+            k_level = level_id[:, :Nk].unsqueeze(-2)  # [B, 1, Nk]
+            same_unit = q_level == k_level  # [B, Nq, Nk]
 
-        mask = same_sent | same_sec
+            mask = mask | same_unit
 
-        # TODO: add neighbour sentences/sections, head-child, [DOC] logic.
+            # TODO: Add parent edges (token → head at each level)
+            # TODO: Add sibling edges (units sharing parent at level+1)
+            # TODO: Add neighbour edges with windowing
 
-        bias = torch.zeros_like(mask, dtype=dtype)
+        # TODO: Add [DOC] token edges if use_doc_token is True
+
+        bias = torch.zeros_like(mask.float(), dtype=dtype)
         bias = bias.masked_fill(~mask, float("-inf"))
         return bias.unsqueeze(1)  # [B, 1, Nq, Nk]

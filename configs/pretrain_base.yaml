@@ -1,30 +1,40 @@
-experiment_name: "lht_pretrain_base"
+experiment_name: "lht_pretrain_hdt_like"
 
 seed: 42
 device: "cuda"
 
 model:
-  vocab_size: 32000
+  vocab_size: 32768           # match HDT paper
   d_model: 768
   n_heads: 12
-  n_layers_local: 3        # layers 1–3
-  n_layers_mid: 3          # layers 4–6
-  n_layers_global: 6       # layers 7–12
-  d_ff: 3072
+  num_layers: 12              # total transformer layers (BERT-base)
+  d_ff: 3072                  # BERT-base style
   dropout: 0.1
-  max_seq_len: 4096
-  rope: true
+  max_seq_len: 8192           # match HDT / Cramming
+  rope: true                  # or false if you keep HPE
 
-router:
-  hidden_dim: 256
-  window_size: 5          # conv context
-  token_to_sentence:
-    target_head_ratio: 0.03
-    loss_weight: 0.05
-  sentence_to_section:
-    target_head_ratio: 0.15
-    loss_weight: 0.05
-  use_gumbel_ste: true
+hierarchy:
+  # K abstraction levels with schedule (at_layer determines when router fires)
+  # Default schedule: local (1-3), sentence-aware (4-6), hierarchical (7-12)
+  levels:
+    - name: "sentence"
+      at_layer: 3              # run sentence router after layer 3
+      target_head_ratio: 0.03  # ~3% of tokens are sentence heads
+      loss_weight: 0.05
+    - name: "section"
+      at_layer: 6              # run section router after layer 6
+      target_head_ratio: 0.15  # ~15% of sentences are section heads
+      loss_weight: 0.05
+    # Example 4-level hierarchy (tokens → sent → para → sec):
+    # - name: "paragraph"
+    #   at_layer: 9
+    #   target_head_ratio: 0.08
+    #   loss_weight: 0.05
+
+  router:
+    hidden_dim: 256
+    window_size: 5             # conv context
+    use_gumbel_ste: true
 
 attention:
   local_window_tokens: 128
@@ -33,24 +43,37 @@ attention:
   use_doc_token: true
 
 training:
-  task: "mlm"              # or "causal_lm"
-  batch_size: 8
-  grad_accum_steps: 4
-  num_steps: 100000
-  warmup_steps: 2000
-  learning_rate: 3.0e-4
+  task: "mlm"                 # Masked Language Modeling
+  # aim for global batch ~128 sequences of length 8192
+  # Example: micro-batch 4, grad_accum 32 -> 4*32 = 128
+  batch_size: 4               # per-GPU microbatch
+  grad_accum_steps: 32
+  num_steps: 10000            # ~HDT-E (24h on 1 GPU)
+  warmup_steps: 1000          # ~10% warmup
+  learning_rate: 3.0e-4       # Cramming-style magnitude
   weight_decay: 0.01
   max_grad_norm: 1.0
   log_every: 100
-  save_every: 5000
-  eval_every: 5000
-  mixed_precision: "bf16"  # or "fp16" / "none"
+  save_every: 2000
+  eval_every: 2000
+  mixed_precision: "bf16"     # or "fp16" / "none"
+  mlm_probability: 0.15       # 15% tokens masked
 
 data:
-  dataset_name: "howey/wiki_en"  # or your own
+  # Same corpora as HDT: unarXive + HUPD + Wikipedia
   text_column: "text"
   num_workers: 4
   shuffle_buffer_size: 10000
-  max_seq_len: 4096
-  tokenizer_name_or_path: "gpt2"
+  max_seq_len: 8192
+  tokenizer_name_or_path: "google-bert/bert-base-uncased"  # or custom BPE-32768
   pretokenized: false
+
+  # Multiple dataset sources with sampling
+  sources:
+    - "howey/unarXive"
+    - "howey/hupd"
+    - "howey/wiki_en"
+  sampling_probs:
+    - 0.4                     # unarXive
+    - 0.3                     # HUPD
+    - 0.3                     # Wikipedia

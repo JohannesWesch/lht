@@ -5,7 +5,7 @@ device: "cuda"
 
 wandb:
   project: "lht-pretraining"
-  entity: "jo-wesch-karlsruhe-institute-of-technology-org"                # set to your wandb username/team
+  entity: null              # set to your wandb username/team
   name: "lht_pretrain_hdt_like"                 # defaults to experiment_name if null
   tags: ["hdt-style", "h-net-routing", "mlm"]
   log_model: false            # save model checkpoints to wandb artifacts

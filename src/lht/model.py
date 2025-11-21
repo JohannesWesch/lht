@@ -146,6 +146,10 @@ class LHTEncoder(nn.Module):
             for level_idx, lvl_cfg in enumerate(config.hierarchy.levels)
         }
 
+        # MLM head with weight tying
+        self.mlm_head = nn.Linear(model_cfg.d_model, model_cfg.vocab_size, bias=False)
+        self.mlm_head.weight = self.token_embed.weight  # tie weights
+
     def _pick_bias_for_layer(
         self,
         layer_idx: int,
@@ -267,8 +271,12 @@ class LHTEncoder(nn.Module):
             else torch.tensor(0.0, device=device)
         )
 
+        # MLM head projection
+        mlm_logits = self.mlm_head(x)  # [B, N, vocab_size]
+
         return {
             "hidden": x,
+            "mlm_logits": mlm_logits,
             "hierarchy": hier_state,
             "router_ratio_loss": router_ratio_loss,
         }

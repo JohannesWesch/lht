@@ -145,17 +145,16 @@ def training_step(
     # Forward pass
     outputs = model(masked_input_ids, attention_mask=attention_mask)
 
-    # TODO: Add LM head to get logits from hidden states
-    # For now, this is a placeholder
-    # mlm_loss = compute_mlm_loss(logits, labels)
+    # Compute MLM loss from model's mlm_logits
+    mlm_logits = outputs["mlm_logits"]
+    mlm_loss = compute_mlm_loss(mlm_logits, labels)
 
     # Router losses from hierarchy state (schedule-driven)
     hier_state = outputs["hierarchy"]
     router_ratio_loss = outputs["router_ratio_loss"]
 
-    # Total loss (TODO: add MLM loss once LM head is implemented)
-    # total_loss = mlm_loss + router_ratio_loss
-    total_loss = router_ratio_loss  # placeholder
+    # Total loss: MLM + router ratio losses
+    total_loss = mlm_loss + router_ratio_loss
 
     # Compute statistics for logging
     with torch.no_grad():
@@ -177,8 +176,8 @@ def training_step(
     # Build result dict
     result = {
         "loss": total_loss,
+        "mlm_loss": mlm_loss,
         "router_ratio_loss": router_ratio_loss,
-        # "mlm_loss": mlm_loss,  # TODO: add when LM head exists
     }
 
     # Add per-level losses

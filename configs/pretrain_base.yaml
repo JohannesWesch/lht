@@ -3,6 +3,16 @@ experiment_name: "lht_pretrain_hdt_like"
 seed: 42
 device: "cuda"
 
+wandb:
+  project: "lht-pretraining"
+  entity: "jo-wesch-karlsruhe-institute-of-technology-org"                # set to your wandb username/team
+  name: "lht_pretrain_hdt_like"                 # defaults to experiment_name if null
+  tags: ["hdt-style", "h-net-routing", "mlm"]
+  log_model: false            # save model checkpoints to wandb artifacts
+  watch_model: "gradients"    # "gradients", "all", or "none"
+  watch_freq: 1000            # log gradients/params every N steps
+  offline: false              # run in offline mode
+
 model:
   vocab_size: 32768           # match HDT paper
   d_model: 768

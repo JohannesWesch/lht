@@ -57,23 +57,38 @@ class SentenceAwareBias(AttentionBias):
     ) -> torch.Tensor:
         """
         Returns a bias tensor of shape [B, 1, Nq, Nk] with 0.0 for allowed pairs
-        and -inf for disallowed ones. You'll implement the actual logic.
+        and -inf for disallowed ones.
+
+        Allowed attention:
+        - Tokens in the same sentence
+        - Any token → sentence head
+        - [DOC] token (position 0) ↔ all tokens (if use_doc_token=True)
         """
         # shape: (B, H, Nq, Nk) or (B, Nq, Nk); here we assume (B, N, N)
         _B, Nq, Nk = shape[-3], shape[-2], shape[-1]
 
         token2sent = self.token2sent.to(device)
+        is_sent_head = self.is_sent_head.to(device)
+
         q_sent = token2sent[:, :Nq].unsqueeze(-1)  # [B, Nq, 1]
         k_sent = token2sent[:, :Nk].unsqueeze(-2)  # [B, 1, Nk]
 
+        # 1. Same sentence (children)
         same_sent = q_sent == k_sent  # [B, Nq, Nk]
-
-        # Start with: only same sentence allowed.
         mask = same_sent
 
-        # TODO: add parent (head) & [DOC] token logic here.
+        # 2. Parent edges: all tokens can attend to sentence heads
+        k_is_head = is_sent_head[:, :Nk].unsqueeze(-2)  # [B, 1, Nk]
+        mask = mask | k_is_head.expand(_B, Nq, Nk)
 
-        bias = torch.zeros_like(mask, dtype=dtype or torch.float32)
+        # 3. [DOC] token edges (position 0)
+        if self.use_doc_token:
+            # Everyone attends to [DOC]
+            mask[:, :, 0] = True
+            # [DOC] attends to everyone
+            mask[:, 0, :] = True
+
+        bias = torch.zeros((_B, Nq, Nk), dtype=dtype or torch.float32, device=device)
         bias = bias.masked_fill(~mask, float("-inf"))
         return bias.unsqueeze(1)  # [B, 1, Nq, Nk]
 
@@ -129,7 +144,7 @@ class HierarchicalBias(AttentionBias):
         For each level ℓ = 1..K:
         - Child edges: tokens in same unit at level ℓ
         - Parent edges: tokens to their head at level ℓ
-        - Sibling edges: units that share a parent at level ℓ+1
+        - Sibling edges: units that share a parent at level ℓ+1 (with windowing)
 
         This is the generic HDT-like pattern.
         """
@@ -138,25 +153,60 @@ class HierarchicalBias(AttentionBias):
         dtype = dtype or torch.float32
 
         # Start with no edges allowed
-        mask = torch.zeros((shape[-3], Nq, Nk), dtype=torch.bool, device=device)
+        mask = torch.zeros((_B, Nq, Nk), dtype=torch.bool, device=device)
 
         # Add edges for each level in the hierarchy
         for level_idx, level_id in enumerate(self.level_ids):
             level_id = level_id.to(device)
+            is_head = self.is_heads[level_idx].to(device)
 
-            # Same-unit edges at this level (children)
+            # 1. Same-unit edges at this level (children)
             q_level = level_id[:, :Nq].unsqueeze(-1)  # [B, Nq, 1]
             k_level = level_id[:, :Nk].unsqueeze(-2)  # [B, 1, Nk]
             same_unit = q_level == k_level  # [B, Nq, Nk]
-
             mask = mask | same_unit
 
-            # TODO: Add parent edges (token → head at each level)
-            # TODO: Add sibling edges (units sharing parent at level+1)
-            # TODO: Add neighbour edges with windowing
+            # 2. Parent edges: all tokens attend to heads at this level
+            k_is_head = is_head[:, :Nk].unsqueeze(-2)  # [B, 1, Nk]
+            mask = mask | k_is_head.expand(_B, Nq, Nk)
 
-        # TODO: Add [DOC] token edges if use_doc_token is True
+            # 3. Sibling edges: attend to neighbouring units
+            # For sentences, attend to neighbour_sentences on each side
+            # For sections, attend to neighbour_sections on each side
+            if level_idx == 0 and self.neighbour_sentences > 0:
+                # Sentence neighbours
+                neighbour_mask = self._neighbour_mask(
+                    q_level, k_level, window=self.neighbour_sentences
+                )
+                mask = mask | neighbour_mask
+            elif level_idx == 1 and self.neighbour_sections > 0:
+                # Section neighbours
+                neighbour_mask = self._neighbour_mask(
+                    q_level, k_level, window=self.neighbour_sections
+                )
+                mask = mask | neighbour_mask
 
-        bias = torch.zeros_like(mask.float(), dtype=dtype)
+        # 4. [DOC] token edges (position 0)
+        if self.use_doc_token:
+            # Everyone attends to [DOC]
+            mask[:, :, 0] = True
+            # [DOC] attends to everyone
+            mask[:, 0, :] = True
+
+        bias = torch.zeros((_B, Nq, Nk), dtype=dtype, device=device)
         bias = bias.masked_fill(~mask, float("-inf"))
         return bias.unsqueeze(1)  # [B, 1, Nq, Nk]
+
+    def _neighbour_mask(
+        self,
+        q_level: torch.Tensor,  # [B, Nq, 1]
+        k_level: torch.Tensor,  # [B, 1, Nk]
+        window: int,
+    ) -> torch.Tensor:
+        """
+        Create mask for neighbouring units within a window.
+
+        Returns True if |q_level_id - k_level_id| <= window
+        """
+        level_diff = (q_level - k_level).abs()  # [B, Nq, Nk]
+        return level_diff <= window

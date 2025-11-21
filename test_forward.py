@@ -42,8 +42,17 @@ try:
 
     print("\n✅ Forward pass successful!")
     print(f"  hidden shape: {out['hidden'].shape}")
+    print(f"  mlm_logits shape: {out['mlm_logits'].shape}")
     print(f"  router_ratio_loss: {out['router_ratio_loss'].item():.4f}")
     print(f"  hierarchy levels: {list(out['hierarchy']['level_ids'].keys())}")
+
+    # Check MLM head
+    expected_vocab_size = cfg.model.vocab_size
+    actual_vocab_size = out["mlm_logits"].shape[-1]
+    assert (
+        actual_vocab_size == expected_vocab_size
+    ), f"MLM vocab mismatch: {actual_vocab_size} != {expected_vocab_size}"
+    print(f"  MLM head: vocab_size={actual_vocab_size} ✓")
 
     # Check hierarchy state
     hier = out["hierarchy"]
@@ -52,7 +61,7 @@ try:
         num_heads = is_head.sum().item()
         print(f"  Level {level}: {num_heads} heads detected")
 
-    print("\n🎉 LHTEncoder is working!")
+    print("\n🎉 LHTEncoder with MLM head is working!")
 
 except Exception as e:
     print("\n❌ Error during forward pass:")

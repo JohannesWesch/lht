@@ -89,6 +89,20 @@ class DataConfig:
 
 
 @dataclass
+class WandbConfig:
+    """Configuration for Weights & Biases logging."""
+
+    project: str
+    entity: Optional[str] = None
+    name: Optional[str] = None  # defaults to experiment_name
+    tags: Optional[List[str]] = None
+    log_model: bool = False  # save checkpoints to wandb artifacts
+    watch_model: str = "gradients"  # "gradients", "all", or "none"
+    watch_freq: int = 1000  # log gradients/params every N steps
+    offline: bool = False  # run in offline mode
+
+
+@dataclass
 class ExperimentConfig:
     experiment_name: str
     seed: int
@@ -98,6 +112,7 @@ class ExperimentConfig:
     attention: AttentionConfig
     training: TrainingConfig
     data: DataConfig
+    wandb: WandbConfig
 
 
 def load_config(path: str) -> ExperimentConfig:
@@ -111,6 +126,10 @@ def load_config(path: str) -> ExperimentConfig:
     router_cfg = RouterConfig(**hierarchy_raw["router"])
     hierarchy = HierarchyConfig(levels=levels, router=router_cfg)
 
+    # Parse wandb config
+    wandb_raw = raw.get("wandb", {})
+    wandb_cfg = WandbConfig(**wandb_raw) if wandb_raw else WandbConfig(project="lht")
+
     return ExperimentConfig(
         experiment_name=raw["experiment_name"],
         seed=raw["seed"],
@@ -120,4 +139,5 @@ def load_config(path: str) -> ExperimentConfig:
         attention=AttentionConfig(**raw["attention"]),
         training=TrainingConfig(**raw["training"]),
         data=DataConfig(**raw["data"]),
+        wandb=wandb_cfg,
     )

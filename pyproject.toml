@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lht"
+version = "0.1.0"
+description = "Learned Hierarchical Transformer (H-Net-style routing + HDT-style attention)"
+readme = "README.md"
+requires-python = ">=3.10"
+
+authors = [
+  { name = "Your Name", email = "you@example.com" }
+]
+
+dependencies = [
+  "torch>=2.0.0",
+  "xformers>=0.0.23",
+  "transformers>=4.40.0",
+  "datasets>=2.18.0",
+  "numpy>=1.24",
+  "tqdm>=4.65.0",
+  "pyyaml>=6.0",
+  "accelerate>=0.28.0",
+  "click>=8.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "black",
+  "isort",
+  "ruff",
+  "pytest",
+  "ipykernel",
+  "pre-commit",
+]
+
+[project.scripts]
+lht-train-pretrain = "lht.main:cli_train_pretrain"
+lht-eval = "lht.main:cli_eval"

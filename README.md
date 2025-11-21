@@ -81,11 +81,17 @@ This makes the architecture fully flexible:
 - Computes ratio losses for all levels
 - Provides compression statistics
 
-**`LevelRouter`**: Generic router for any abstraction level
+**`LevelRouter`**: Generic router for any abstraction level (H-Net Dynamic Chunking)
 
+- Implements H-Net's dynamic chunking mechanism (https://arxiv.org/abs/2507.07955)
+- **Cosine similarity** between adjacent projected states (Eq. 4)
+- **Hard boundary indicators** via threshold: `b_t = 1[p_t >= 0.5]` (no Gumbel-Softmax)
+- **Ratio loss** to encourage target compression factor (Eq. 10)
 - Works for: token→sentence, sentence→paragraph, paragraph→section, etc.
-- Uses straight-through estimation (STE) for gradients
-- Predicts boundaries via simple MLP (can be enhanced with convolutions)
+
+**Why no upsampling module?**
+
+H-Net includes an upsampling module because it's an autoencoder (encoder compresses → decoder reconstructs). LHT is a hierarchical transformer with progressive abstraction (tokens → sentences → sections), not compression-reconstruction. Higher hierarchy levels intentionally don't need token-level resolution, and upsampling would reintroduce O(N²) attention costs. Therefore, LHT uses only H-Net's dynamic chunking and ratio loss, not the autoencoder-specific upsampling/smoothing modules.
 
 ### Attention Biases
 

@@ -26,9 +26,6 @@ def build_local_attention_bias(
     return LocalAttentionFromBottomRightMask(
         window_left=window_size,
         window_right=window_size,
-        seq_len_q=seq_len,
-        seq_len_k=seq_len,
-        device=device,
     )
 
 

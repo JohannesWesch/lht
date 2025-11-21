@@ -47,12 +47,14 @@ class HierarchyManager(nn.Module):
         self.d_model = d_model
 
         # Create K routers, one for each abstraction level
+        # H-Net style: each router gets target_head_ratio and loss_weight directly
         self.routers = nn.ModuleList(
             [
                 LevelRouter(
                     level_name=level_cfg.name,
                     d_model=d_model,
-                    router_config=hierarchy_config.router,
+                    target_head_ratio=level_cfg.target_head_ratio,
+                    loss_weight=level_cfg.loss_weight,
                 )
                 for level_cfg in hierarchy_config.levels
             ]
@@ -139,35 +141,17 @@ class HierarchyManager(nn.Module):
             state["ratio_losses"] = {}
 
         level_idx = target_level - 1
-        lvl_cfg = self.cfg.levels[level_idx]
         router = self.routers[level_idx]
 
-        # Run router
-        if target_level == 1:
-            router_out = router(hidden, attention_mask=attention_mask)
-        else:
-            # Use previous level's info
-            prev_level = target_level - 1
-            router_out = router(
-                hidden=hidden,
-                prev_level_ids=state["level_ids"].get(prev_level),
-                prev_is_heads=state["is_heads"].get(prev_level),
-                attention_mask=attention_mask,
-            )
+        # Run router (H-Net style - doesn't use prev_level info yet)
+        router_out = router(hidden, attention_mask=attention_mask)
 
         # Update state
         state["level_ids"][target_level] = router_out["level_ids"]
         state["is_heads"][target_level] = router_out["is_head"]
 
-        # Compute ratio loss
-        probs = router_out["probs"]
-        mask = attention_mask.float()
-        num_valid = mask.sum(dim=-1).clamp(min=1.0)
-        expected_heads = (probs * mask).sum(dim=-1) / num_valid
-        ratio_loss = (expected_heads - lvl_cfg.target_head_ratio).abs().mean()
-        weighted_loss = lvl_cfg.loss_weight * ratio_loss
-
-        state["ratio_losses"][target_level] = weighted_loss
+        # H-Net router returns ratio_loss directly (already weighted)
+        state["ratio_losses"][target_level] = router_out["ratio_loss"]
 
         return state
 
@@ -177,38 +161,29 @@ class HierarchyManager(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
-        Compute ratio losses for all K levels.
+        Aggregate ratio losses from all K levels.
+
+        Note: H-Net routers compute their own losses during forward(),
+        so this method just aggregates them.
 
         Args:
             hierarchy_output: output from forward()
-            attention_mask: [B, N] mask for valid tokens
+            attention_mask: [B, N] mask for valid tokens (unused, kept for API compat)
 
         Returns:
             dict with individual and total losses
         """
-        if attention_mask is None:
-            attention_mask = torch.ones_like(hierarchy_output["level_ids"][0])
-
         losses = {}
         total_loss = 0.0
 
         for level_idx, (level_cfg, router_out) in enumerate(
             zip(self.cfg.levels, hierarchy_output["router_outputs"])
         ):
-            # Compute ratio loss for this level
-            probs = router_out["probs"]
-            target_ratio = level_cfg.target_head_ratio
-            weight = level_cfg.loss_weight
-
-            num_valid = attention_mask.sum(dim=-1).clamp(min=1.0)
-            expected_heads = (probs * attention_mask).sum(dim=-1) / num_valid
-            ratio_loss = (expected_heads - target_ratio).abs().mean()
-            weighted_loss = weight * ratio_loss
-
+            # H-Net routers return ratio_loss directly
+            ratio_loss = router_out["ratio_loss"]
             level_name = level_cfg.name
             losses[f"ratio_loss_{level_name}"] = ratio_loss
-            losses[f"weighted_loss_{level_name}"] = weighted_loss
-            total_loss = total_loss + weighted_loss
+            total_loss = total_loss + ratio_loss
 
         losses["total_hierarchy_loss"] = total_loss
         return losses

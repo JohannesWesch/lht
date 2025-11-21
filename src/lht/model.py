@@ -8,10 +8,11 @@ This module defines LHTEncoder with:
 - Support for arbitrary K-level hierarchies
 """
 
-from typing import Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional
 
 import torch
 import torch.nn as nn
+from xformers.ops import memory_efficient_attention
 
 from .attention_masks import (
     HierarchicalBias,
@@ -19,6 +20,81 @@ from .attention_masks import (
     build_local_attention_bias,
 )
 from .hierarchy import HierarchyManager
+
+if TYPE_CHECKING:
+    from xformers.ops.fmha.attn_bias import AttentionBias
+
+
+class LHTTransformerBlock(nn.Module):
+    """
+    Single Transformer block for LHT.
+
+    Uses xFormers memory_efficient_attention with an AttentionBias.
+    Input/Output: [B, N, D]
+    """
+
+    def __init__(self, d_model: int, n_heads: int, d_ff: int, dropout: float):
+        super().__init__()
+        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+
+        # QKV projections and output projection
+        self.qkv = nn.Linear(d_model, 3 * d_model)
+        self.out_proj = nn.Linear(d_model, d_model)
+
+        # Feed-forward network
+        self.ff = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            nn.GELU(),
+            nn.Linear(d_ff, d_model),
+        )
+
+        # Layer norms
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+
+        # Dropout
+        self.dropout_attn = nn.Dropout(dropout)
+        self.dropout_ff = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        x: torch.Tensor,  # [B, N, D]
+        attn_bias: Optional["AttentionBias"] = None,
+        attention_mask: Optional[torch.Tensor] = None,  # [B, N], currently unused
+    ) -> torch.Tensor:
+        # ---- Self-attention ----
+        residual = x
+        x_norm = self.norm1(x)
+
+        # Project to Q, K, V
+        qkv = self.qkv(x_norm)  # [B, N, 3*D]
+        B, N, _ = qkv.shape
+        qkv = qkv.view(B, N, 3, self.n_heads, self.head_dim)
+        q, k, v = qkv.unbind(dim=2)  # each [B, N, H, Dh]
+
+        # xFormers expects [B, N, H, Dh]
+        attn_out = memory_efficient_attention(
+            q, k, v, attn_bias=attn_bias
+        )  # [B, N, H, Dh]
+
+        # Merge heads back
+        attn_out = attn_out.reshape(B, N, self.d_model)
+        attn_out = self.out_proj(attn_out)
+        attn_out = self.dropout_attn(attn_out)
+
+        x = residual + attn_out
+
+        # ---- Feed-forward ----
+        residual = x
+        x_norm = self.norm2(x)
+        ff_out = self.ff(x_norm)
+        ff_out = self.dropout_ff(ff_out)
+        x = residual + ff_out
+
+        return x
 
 
 class LHTEncoder(nn.Module):
@@ -40,23 +116,28 @@ class LHTEncoder(nn.Module):
         super().__init__()
         self.cfg = config
 
+        # Access model config properly
+        model_cfg = config.model if hasattr(config, "model") else config
+
         # Embeddings
-        self.token_embed = nn.Embedding(config.vocab_size, config.d_model)
+        self.token_embed = nn.Embedding(model_cfg.vocab_size, model_cfg.d_model)
         self.pos_embed = None  # you may use RoPE instead of absolute embeddings
 
         # Single stack of transformer layers (no local/mid/global separation)
-        self.layers = nn.ModuleList()
-        # TODO: construct actual Transformer blocks
-        # For now, empty list - will be filled when implementing blocks
-        # Example:
-        # self.layers = nn.ModuleList([
-        #     LHTTransformerBlock(config.d_model, config.n_heads,
-        #                         config.d_ff, config.dropout)
-        #     for _ in range(config.num_layers)
-        # ])
+        self.layers = nn.ModuleList(
+            [
+                LHTTransformerBlock(
+                    model_cfg.d_model,
+                    model_cfg.n_heads,
+                    model_cfg.d_ff,
+                    model_cfg.dropout,
+                )
+                for _ in range(model_cfg.num_layers)
+            ]
+        )
 
         # Hierarchy Manager: handles K abstraction levels
-        self.hierarchy_mgr = HierarchyManager(config.hierarchy, config.d_model)
+        self.hierarchy_mgr = HierarchyManager(config.hierarchy, model_cfg.d_model)
         self.num_levels = self.hierarchy_mgr.num_levels
 
         # Build router schedule: which layer triggers which router
@@ -151,9 +232,10 @@ class LHTEncoder(nn.Module):
         }
 
         # Process through all layers with schedule-driven routing
-        for layer_idx in range(1, self.cfg.model.num_layers + 1):
+        model_cfg = self.cfg.model if hasattr(self.cfg, "model") else self.cfg
+        for layer_idx in range(1, model_cfg.num_layers + 1):
             # 1) Choose attention bias for this layer
-            _attn_bias = self._pick_bias_for_layer(
+            attn_bias = self._pick_bias_for_layer(
                 layer_idx=layer_idx,
                 hier_state=hier_state,
                 seq_len=N,
@@ -161,10 +243,11 @@ class LHTEncoder(nn.Module):
             )
 
             # 2) Run transformer block
-            # TODO: Implement actual transformer blocks
-            # For now, skip since layers list is empty
-            # x = self.layers[layer_idx - 1](x, attn_bias=_attn_bias,
-            #                                 attention_mask=attention_mask)
+            x = self.layers[layer_idx - 1](
+                x,
+                attn_bias=attn_bias,
+                attention_mask=attention_mask,
+            )
 
             # 3) Check if router should fire after this layer
             if layer_idx in self.router_schedule:

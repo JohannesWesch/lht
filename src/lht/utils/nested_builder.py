@@ -15,7 +15,6 @@ import torch
 from transformers import PreTrainedTokenizer
 
 from lht.core.attention import GeometricCoordinates
-from lht.core.coords import build_coords
 
 
 def build_coords_from_nested_list(
@@ -99,28 +98,20 @@ def build_coords_from_nested_list(
         if len(flat_input_ids) >= max_length:
             break
 
-    # Build section parents (top level, point to themselves)
-    # Actually, build_coords expects:
-    # parent_maps[L-1][i] = own_id
-    # So for 3 levels:
-    # 0->1 (tokens -> sentences)
-    # 1->2 (sentences -> sections)
-    # 2 (sections -> sections/self)
+    # Build coords - we only need coordinates for actual tokens, not hierarchy nodes
+    # Each token gets (level, logical_time) describing its place in hierarchy
+    # We don't create separate coordinate entries for sentences/sections
 
-    # Total sections used
-    num_sections_used = current_section_id
-    # If we stopped mid-section, current_section_id was incremented at end of loop
-    # Wait, logical_time for top level must be own_id.
-    section_parents = list(range(num_sections_used))
+    # For tokens: level=0, logical_time=sentence_id
+    levels = [0] * len(flat_input_ids)
+    logical_times = token_parents  # Each token's logical_time is its parent sentence ID
 
-    # Construct coords
-    parent_maps = [token_parents, sentence_parents, section_parents]
-
-    # Check consistency
-    # len(token_parents) should match len(flat_input_ids)
-    # len(sentence_parents) should match current_sentence_id
-    # len(section_parents) should match num_sections_used
-
-    coords = build_coords(parent_maps, device=device)
+    coords = GeometricCoordinates(
+        levels=torch.tensor(levels, dtype=torch.long, device=device),
+        logical_times=torch.tensor(logical_times, dtype=torch.long, device=device),
+        physical_positions=torch.arange(
+            len(flat_input_ids), dtype=torch.long, device=device
+        ),
+    )
 
     return flat_input_ids, coords

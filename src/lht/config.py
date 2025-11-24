@@ -12,6 +12,25 @@ import yaml
 
 
 @dataclass
+class GeometryConfig:
+    """Configuration for geometric attention hierarchy.
+
+    Controls which hierarchy levels are active in each layer and their window sizes:
+    - Early layers: tokens only (max_level=0), window of 512 tokens
+    - Middle layers: tokens + sentences (max_level=1), 512 tokens + 64 sentences
+    - Deep layers: all levels, 512 tokens + 64 sentences + 16 sections
+
+    Manhattan radius is typically fixed at 1-2 for parent-child connectivity.
+    Window sizes control how many elements at each level can participate.
+    """
+
+    num_levels: int  # e.g. 3 → 0=token, 1=sent, 2=sec
+    manhattan_radius: int = 1  # Fixed geometric radius (usually 1)
+    window_size_per_level: List[int]  # [512, 64, 16] = tokens, sentences, sections
+    layer_max_level: List[int]  # len = num_layers, max active level per layer
+
+
+@dataclass
 class ModelConfig:
     vocab_size: int
     d_model: int
@@ -21,6 +40,7 @@ class ModelConfig:
     dropout: float
     max_seq_len: int
     rope: bool = True
+    geometry: GeometryConfig = None  # Geometric attention config
 
 
 @dataclass
@@ -87,11 +107,22 @@ def load_config(path: str) -> ExperimentConfig:
     wandb_raw = raw.get("wandb", {})
     wandb_cfg = WandbConfig(**wandb_raw) if wandb_raw else WandbConfig(project="lht")
 
+    # Parse model config with nested geometry
+    model_raw = raw["model"]
+    geometry_raw = model_raw.get("geometry")
+    if geometry_raw:
+        geometry_cfg = GeometryConfig(**geometry_raw)
+        # Remove geometry from model_raw so it doesn't conflict
+        model_raw_copy = {k: v for k, v in model_raw.items() if k != "geometry"}
+        model_cfg = ModelConfig(**model_raw_copy, geometry=geometry_cfg)
+    else:
+        model_cfg = ModelConfig(**model_raw)
+
     return ExperimentConfig(
         experiment_name=raw["experiment_name"],
         seed=raw["seed"],
         device=raw["device"],
-        model=ModelConfig(**raw["model"]),
+        model=model_cfg,
         training=TrainingConfig(**raw["training"]),
         data=DataConfig(**raw["data"]),
         wandb=wandb_cfg,

@@ -16,6 +16,19 @@ UTILS (extras):
 """
 
 # ============================================================================
+# CONFIG (Configuration management)
+# ============================================================================
+from .config import (
+    DataConfig,
+    ExperimentConfig,
+    GeometryConfig,
+    ModelConfig,
+    TrainingConfig,
+    WandbConfig,
+    load_config,
+)
+
+# ============================================================================
 # CORE (Essential functionality)
 # ============================================================================
 from .core import (
@@ -50,6 +63,14 @@ __all__ = [
     "create_geometric_mask",
     "build_coords",
     "GeometricTransformerBlock",
+    # Config
+    "GeometryConfig",
+    "ModelConfig",
+    "TrainingConfig",
+    "DataConfig",
+    "WandbConfig",
+    "ExperimentConfig",
+    "load_config",
     # Utils (extras)
     "build_two_level_coords",
     "build_three_level_coords",

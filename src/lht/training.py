@@ -2,8 +2,7 @@
 Training loop utilities for LHT.
 
 This module defines:
-- MLM (Masked Language Modeling) utilities matching HDT's setup
-- Router ratio loss computation
+- MLM (Masked Language Modeling) utilities
 - Training step implementation
 - Logging hooks
 """
@@ -11,24 +10,6 @@ This module defines:
 from typing import Dict, Tuple
 
 import torch
-
-
-def compute_ratio_loss(
-    probs: torch.Tensor,
-    target_ratio: float,
-    weight: float,
-    mask: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Encourage router probabilities to yield a specific proportion of heads.
-
-    probs: [B, N]
-    mask: [B, N] (1 for valid tokens, 0 for padding)
-    """
-    num_valid = mask.sum(dim=-1).clamp(min=1.0)
-    expected_heads = (probs * mask).sum(dim=-1) / num_valid  # [B]
-    loss = (expected_heads - target_ratio).abs().mean()
-    return weight * loss
 
 
 def mask_tokens_for_mlm(
@@ -121,7 +102,7 @@ def training_step(
     cfg,
 ) -> Dict[str, torch.Tensor]:
     """
-    Single training step for LHT with MLM objective + router losses.
+    Single training step for LHT with MLM objective.
 
     Args:
         model: LHTEncoder
@@ -149,45 +130,13 @@ def training_step(
     mlm_logits = outputs["mlm_logits"]
     mlm_loss = compute_mlm_loss(mlm_logits, labels)
 
-    # Router losses from hierarchy state (schedule-driven)
-    hier_state = outputs["hierarchy"]
-    router_ratio_loss = outputs["router_ratio_loss"]
-
-    # Total loss: MLM + router ratio losses
-    total_loss = mlm_loss + router_ratio_loss
-
-    # Compute statistics for logging
-    with torch.no_grad():
-        _level_ids = hier_state.get("level_ids", {})
-        is_heads = hier_state.get("is_heads", {})
-        ratio_losses = hier_state.get("ratio_losses", {})
-
-        stats = {}
-        if attention_mask is not None:
-            num_valid = attention_mask.sum()
-            for level_num, is_head in is_heads.items():
-                level_name = cfg.hierarchy.levels[level_num - 1].name
-                num_heads = (is_head * attention_mask).sum()
-                stats[f"avg_{level_name}s_per_doc"] = (num_heads / num_valid).item()
-                stats[f"compression_{level_name}"] = (
-                    num_valid / num_heads.clamp(min=1)
-                ).item()
+    # Total loss
+    total_loss = mlm_loss
 
     # Build result dict
     result = {
         "loss": total_loss,
         "mlm_loss": mlm_loss,
-        "router_ratio_loss": router_ratio_loss,
     }
 
-    # Add per-level losses
-    for level_num, loss in ratio_losses.items():
-        level_name = cfg.hierarchy.levels[level_num - 1].name
-        result[f"ratio_loss_{level_name}"] = loss
-
-    result.update(stats)
-
     return result
-
-
-# (Main training loop to be added here.)

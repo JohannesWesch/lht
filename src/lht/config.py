@@ -24,41 +24,6 @@ class ModelConfig:
 
 
 @dataclass
-class HierarchyLevelConfig:
-    """Config for a single level of the learned hierarchy."""
-
-    name: str  # e.g., "sentence", "paragraph", "section"
-    at_layer: int  # which layer to run this router after (1-indexed)
-    target_head_ratio: float  # target proportion of head tokens
-    loss_weight: float  # weight for ratio loss
-
-
-@dataclass
-class RouterConfig:
-    """Config for the router network architecture."""
-
-    hidden_dim: int
-    window_size: int
-    use_gumbel_ste: bool
-
-
-@dataclass
-class HierarchyConfig:
-    """Config for the full learned hierarchy (K levels)."""
-
-    levels: List[HierarchyLevelConfig]  # K abstraction levels
-    router: RouterConfig  # shared router architecture
-
-
-@dataclass
-class AttentionConfig:
-    local_window_tokens: int
-    neighbour_sentences: int
-    neighbour_sections: int
-    use_doc_token: bool
-
-
-@dataclass
 class TrainingConfig:
     task: str
     batch_size: int
@@ -108,8 +73,6 @@ class ExperimentConfig:
     seed: int
     device: str
     model: ModelConfig
-    hierarchy: HierarchyConfig
-    attention: AttentionConfig
     training: TrainingConfig
     data: DataConfig
     wandb: WandbConfig
@@ -120,12 +83,6 @@ def load_config(path: str) -> ExperimentConfig:
     with open(path, "r") as f:
         raw = yaml.safe_load(f)
 
-    # Parse hierarchy levels
-    hierarchy_raw = raw["hierarchy"]
-    levels = [HierarchyLevelConfig(**lvl) for lvl in hierarchy_raw["levels"]]
-    router_cfg = RouterConfig(**hierarchy_raw["router"])
-    hierarchy = HierarchyConfig(levels=levels, router=router_cfg)
-
     # Parse wandb config
     wandb_raw = raw.get("wandb", {})
     wandb_cfg = WandbConfig(**wandb_raw) if wandb_raw else WandbConfig(project="lht")
@@ -135,8 +92,6 @@ def load_config(path: str) -> ExperimentConfig:
         seed=raw["seed"],
         device=raw["device"],
         model=ModelConfig(**raw["model"]),
-        hierarchy=hierarchy,
-        attention=AttentionConfig(**raw["attention"]),
         training=TrainingConfig(**raw["training"]),
         data=DataConfig(**raw["data"]),
         wandb=wandb_cfg,

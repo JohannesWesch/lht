@@ -47,9 +47,8 @@ hierarchy:
     use_gumbel_ste: true
 
 attention:
-  local_window_tokens: 128
-  neighbour_sentences: 1
-  neighbour_sections: 1
+  local_window_tokens: 128     # Sliding window for initial layers (before routers)
+  neighbour_windows: [1, 1]    # Fallback for top level (no parent yet); ignored when parent exists
   use_doc_token: true
 
 training:

@@ -4,17 +4,17 @@ Visualization utilities for W&B logging.
 This module provides functions for:
 - Sample MLM predictions with decoded text
 - Attention heatmap visualization
-- Hierarchy boundary overlays
 - Gradient flow visualization
 - Attention entropy computation
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import torch
+
 import wandb
 
 
@@ -160,68 +160,6 @@ def create_attention_heatmap(
     return fig
 
 
-def visualize_hierarchy_boundaries(
-    text: str,
-    boundary_positions: Dict[str, List[int]],
-    tokenizer,
-) -> plt.Figure:
-    """
-    Visualize hierarchy boundaries overlaid on text.
-
-    Args:
-        text: input text string
-        boundary_positions: dict mapping level_name -> list of boundary token positions
-        tokenizer: HuggingFace tokenizer
-
-    Returns:
-        matplotlib Figure
-    """
-    tokens = tokenizer.tokenize(text)
-    n_tokens = len(tokens)
-
-    # Create figure
-    fig, ax = plt.subplots(figsize=(16, 4))
-
-    # Plot tokens
-    x_positions = np.arange(n_tokens)
-    y_base = 0
-
-    # Color map for different levels
-    level_colors = {
-        "sentence": "blue",
-        "paragraph": "green",
-        "section": "red",
-    }
-
-    # Draw boundaries for each level
-    for _level_idx, (level_name, boundaries) in enumerate(boundary_positions.items()):
-        color = level_colors.get(level_name, "gray")
-
-        for boundary_pos in boundaries:
-            if boundary_pos < n_tokens:
-                ax.axvline(
-                    x=boundary_pos,
-                    ymin=y_base,
-                    ymax=y_base + 0.25,
-                    color=color,
-                    linewidth=2,
-                    label=level_name if boundary_pos == boundaries[0] else "",
-                    alpha=0.7,
-                )
-
-    # Add token labels
-    ax.set_xticks(x_positions)
-    ax.set_xticklabels(tokens, rotation=90, fontsize=8)
-    ax.set_ylim(-0.1, 1)
-    ax.set_xlim(-1, n_tokens)
-    ax.set_title("Learned Hierarchy Boundaries", fontsize=14, fontweight="bold")
-    ax.legend(loc="upper right")
-    ax.grid(axis="x", alpha=0.3)
-
-    plt.tight_layout()
-    return fig
-
-
 def compute_attention_entropy(
     attention_weights: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
 ) -> torch.Tensor:
@@ -301,56 +239,3 @@ def log_gradient_flow(
 
     plt.tight_layout()
     return fig
-
-
-def log_router_statistics(
-    hierarchy_state: Dict,
-    attention_mask: torch.Tensor,
-    config,
-) -> Dict[str, float]:
-    """
-    Compute detailed router statistics for logging.
-
-    Args:
-        hierarchy_state: hierarchy state dict from model forward pass
-        attention_mask: [B, N] attention mask
-        config: experiment config
-
-    Returns:
-        dict of statistics
-    """
-    stats = {}
-
-    level_ids = hierarchy_state.get("level_ids", {})
-    is_heads = hierarchy_state.get("is_heads", {})
-    ratio_losses = hierarchy_state.get("ratio_losses", {})
-
-    num_valid = attention_mask.sum()
-
-    for level_num, level_id_tensor in level_ids.items():
-        level_name = config.hierarchy.levels[level_num - 1].name
-        is_head = is_heads[level_num]
-
-        # Count heads
-        num_heads = (is_head * attention_mask).sum().item()
-        avg_heads_per_doc = num_heads / attention_mask.size(0)
-
-        # Compression ratio
-        compression = num_valid.item() / max(num_heads, 1)
-
-        # Ratio loss
-        ratio_loss = ratio_losses.get(level_num, torch.tensor(0.0)).item()
-
-        # Number of unique groups
-        num_groups = len(torch.unique(level_id_tensor[attention_mask.bool()]))
-
-        stats[f"router/{level_name}_heads_per_doc"] = avg_heads_per_doc
-        stats[f"router/{level_name}_compression"] = compression
-        stats[f"router/{level_name}_ratio_loss"] = ratio_loss
-        stats[f"router/{level_name}_num_groups"] = num_groups
-
-        # Boundary density (heads per 100 tokens)
-        boundary_density = (num_heads / num_valid.item()) * 100
-        stats[f"router/{level_name}_boundary_density_pct"] = boundary_density
-
-    return stats

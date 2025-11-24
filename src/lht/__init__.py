@@ -1,20 +1,62 @@
 """
 Learned Hierarchical Transformer (LHT).
 
-This package implements:
-- Encoder architecture with local → mid → global layers
-- H-Net-style routers to learn K-level hierarchies (variable depth)
-- HDT-style hierarchical attention masks using xFormers
-- Support for 2, 3, 4, or N abstraction levels
+Clean separation: core/ and utils/
 
-Example hierarchies:
-- 2 levels: tokens → sentences
-- 3 levels: tokens → sentences → sections
-- 4 levels: tokens → sentences → paragraphs → sections
+CORE (~150 lines):
+    - core.attention: Geometric attention mechanism
+    - core.coords: Universal coordinate builder
+    - core.model: Transformer block (optional)
+
+UTILS (extras):
+    - utils.coord_builders: Convenience builders
+    - utils.verification: Debug helpers
+    - utils.visualization: Simple visualization
+    - utils.full_encoder: Complete encoder (optional)
 """
 
-from .hierarchy import HierarchyManager
-from .model import LHTEncoder
+# ============================================================================
+# CORE (Essential functionality)
+# ============================================================================
+from .core import (
+    GeometricCoordinates,
+    GeometricTransformerBlock,
+    build_coords,
+    create_geometric_mask,
+    geometric_attention,
+)
+
+# ============================================================================
+# LEGACY (kept for backwards compatibility)
+# ============================================================================
 from .routers import LevelRouter
 
-__all__ = ["LHTEncoder", "HierarchyManager", "LevelRouter"]
+# ============================================================================
+# UTILS (Convenience and debugging)
+# ============================================================================
+from .utils import (
+    GeometricLHTEncoder,
+    build_flat_coords,
+    build_three_level_coords,
+    build_two_level_coords,
+    verify_parent_child_distances,
+    visualize_coords,
+)
+
+__all__ = [
+    # Core (essentials)
+    "GeometricCoordinates",
+    "geometric_attention",
+    "create_geometric_mask",
+    "build_coords",
+    "GeometricTransformerBlock",
+    # Utils (extras)
+    "build_two_level_coords",
+    "build_three_level_coords",
+    "build_flat_coords",
+    "verify_parent_child_distances",
+    "visualize_coords",
+    "GeometricLHTEncoder",
+    # Legacy
+    "LevelRouter",
+]

@@ -6,18 +6,18 @@ A hierarchical transformer encoder implementation with **variable-depth learned 
 - **Multi-scale processing**: Local → Mid → Global layers with different attention patterns
 - **Flexible hierarchy depth**: Support for 2, 3, 4, or N abstraction levels
 
-## Variable-Depth Hierarchies
+## Variable-Depth Learned Hierarchies
 
-Unlike HDT which fixes 2 levels (sentences and sections), LHT supports arbitrary hierarchy depth:
+Unlike HDT which fixes 2 linguistic levels (sentences and sections), LHT supports arbitrary depth with **learned** boundaries:
 
 | K Levels | Hierarchy Structure |
 |----------|-------------------|
-| **2** | tokens → sentences |
-| **3** | tokens → sentences → sections *(default)* |
-| **4** | tokens → sentences → paragraphs → sections |
+| **2** | tokens → level-0 groups |
+| **3** | tokens → level-0 → level-1 *(default)* |
+| **4** | tokens → level-0 → level-1 → level-2 |
 | **N** | arbitrary depth |
 
-This is controlled via a simple config change - no code modifications required!
+All boundaries are learned via H-Net routers (no linguistic supervision). This is controlled via simple config changes - no code modifications required!
 
 ## Installation
 
@@ -66,10 +66,10 @@ This makes the architecture fully flexible:
 
 **Example schedule (default):**
 1. **Layers 1-3**: Sliding window attention (before any routers)
-2. **Router fires after layer 3**: Learn sentence boundaries
-3. **Layers 4-6**: Sentence-aware attention
-4. **Router fires after layer 6**: Learn section boundaries
-5. **Layers 7-12**: Full hierarchical attention (sentences + sections)
+2. **Router fires after layer 3**: Learn level-0 boundaries (finest-grained groups)
+3. **Layers 4-6**: Level-0 hierarchical attention
+4. **Router fires after layer 6**: Learn level-1 boundaries (coarser groups)
+5. **Layers 7-12**: Full K=2 hierarchical attention (level-0 + level-1)
 
 ### Hierarchy System
 
@@ -87,17 +87,34 @@ This makes the architecture fully flexible:
 - **Cosine similarity** between adjacent projected states (Eq. 4)
 - **Hard boundary indicators** via threshold: `b_t = 1[p_t >= 0.5]` (no Gumbel-Softmax)
 - **Ratio loss** to encourage target compression factor (Eq. 10)
-- Works for: token→sentence, sentence→paragraph, paragraph→section, etc.
+- Works for any level: tokens→level-0, level-0→level-1, level-1→level-2, etc.
 
 **Why no upsampling module?**
 
-H-Net includes an upsampling module because it's an autoencoder (encoder compresses → decoder reconstructs). LHT is a hierarchical transformer with progressive abstraction (tokens → sentences → sections), not compression-reconstruction. Higher hierarchy levels intentionally don't need token-level resolution, and upsampling would reintroduce O(N²) attention costs. Therefore, LHT uses only H-Net's dynamic chunking and ratio loss, not the autoencoder-specific upsampling/smoothing modules.
+H-Net includes an upsampling module because it's an autoencoder (encoder compresses → decoder reconstructs). LHT is a hierarchical transformer with progressive abstraction across K learned levels, not compression-reconstruction. Higher hierarchy levels intentionally don't need token-level resolution, and upsampling would reintroduce O(N²) attention costs. Therefore, LHT uses only H-Net's dynamic chunking and ratio loss, not the autoencoder-specific upsampling/smoothing modules.
+
+**Why hybrid HDT + neighbor windows?**
+
+HDT assumes all levels are known from the start (sentences, sections, document), so siblings = "same parent". LHT learns levels progressively:
+- After Router 1: Only level 0 exists (no parent yet)
+- After Router 2: Levels 0-1 exist (level 0 has parent, level 1 doesn't)
+- After Router K: All K levels exist
+
+The **top level at any point has no parent yet**, so we use a numeric neighbor window as fallback. Once the next router creates a parent level, we automatically switch to HDT siblings (same parent = all neighbors). This hybrid approach:
+- **With parent (ℓ+1 exists)**: Pure HDT — e.g., all 20 sentence heads in same section communicate
+- **Without parent (top level)**: Numeric window — e.g., level-1 heads attend to ±1 neighbors
+- **Progressive**: Transitions from window → HDT as hierarchy grows
 
 ### Attention Biases
 
-- `build_local_attention_bias()`: Sliding window for local layers
-- `SentenceAwareBias`: Restricts attention to first-level units + heads
-- `HierarchicalBias`: Generic K-level child/parent/neighbour attention
+- `build_local_attention_bias()`: Sliding window for token-level (no hierarchy yet)
+- `HierarchicalBias`: Generic K-level child/parent/sibling attention with **hybrid HDT + fallback**
+  - Level 0: all tokens in same group
+  - Level ℓ>0: previous-level heads within group
+  - **Sibling edges (hybrid)**:
+    - If level ℓ+1 exists: HDT siblings (same parent = all neighbors in group)
+    - If level ℓ is top: numeric neighbor window (fallback until parent learned)
+  - [DOC] token connecting to top-level heads only
 
 ## Project Structure
 
@@ -156,65 +173,71 @@ LHT's default configuration matches HDT-E (encoder-only) for fair comparison:
 - `hierarchy`: **Variable-depth hierarchy configuration**
   - `levels`: List of abstraction levels (controls K)
   - `router`: Shared router architecture for all levels
-- `attention`: Attention patterns (window sizes, neighbour counts)
+- `attention`: Attention patterns (local window, neighbor fallback, DOC token)
 - `training`: Optimization settings (batch_size, learning_rate, steps, MLM probability)
 - `data`: Dataset specification (multiple sources, sampling probabilities)
 
 ### Configuring Hierarchy Depth & Schedule
 
-The `at_layer` field controls when each router fires. This determines the "local/mid/global" behavior:
+The `at_layer` field controls when each router fires. This determines the attention pattern transitions:
 
-**2 levels (sentences only) with local layers 1-6:**
+**K=1 (single learned level) with local layers 1-6:**
 ```yaml
 model:
   num_layers: 12
 hierarchy:
   levels:
-    - name: "sentence"
+    - name: "level0"
       at_layer: 6              # router fires after layer 6
       target_head_ratio: 0.03
       loss_weight: 0.05
+attention:
+  neighbour_windows: [1]       # Level 0 is top (no parent), uses window fallback
 ```
 
-**3 levels (default) with local/sentence-aware/hierarchical:**
+**K=2 (default, two learned levels):**
 ```yaml
 hierarchy:
   levels:
-    - name: "sentence"
-      at_layer: 3              # local → sentence-aware transition
+    - name: "level0"
+      at_layer: 3              # local → level-0 hierarchy transition
       target_head_ratio: 0.03
       loss_weight: 0.05
-    - name: "section"
-      at_layer: 6              # sentence-aware → hierarchical transition
+    - name: "level1"
+      at_layer: 6              # level-0 → full K=2 hierarchy transition
       target_head_ratio: 0.15
       loss_weight: 0.05
+attention:
+  neighbour_windows: [1, 1]    # Level 0 uses HDT (has parent), Level 1 uses window (top)
 ```
 
-**4 levels (add paragraphs):**
+**K=3 (three learned levels):**
 ```yaml
 hierarchy:
   levels:
-    - name: "sentence"
+    - name: "level0"
       at_layer: 3
       target_head_ratio: 0.03
       loss_weight: 0.05
-    - name: "paragraph"
+    - name: "level1"
       at_layer: 6
       target_head_ratio: 0.08
       loss_weight: 0.05
-    - name: "section"
+    - name: "level2"
       at_layer: 9
       target_head_ratio: 0.15
       loss_weight: 0.05
+attention:
+  neighbour_windows: [1, 1, 2]  # Levels 0-1 use HDT, Level 2 (top) uses wider window
 ```
 
-**Shallow model (6 layers, 1 level):**
+**Shallow model (6 layers, K=1):**
 ```yaml
 model:
   num_layers: 6
 hierarchy:
   levels:
-    - name: "sentence"
+    - name: "level0"
       at_layer: 3
       target_head_ratio: 0.03
       loss_weight: 0.05
@@ -226,22 +249,23 @@ While LHT aligns with HDT's training setup for fair comparison, it differs in se
 
 | Aspect | HDT | LHT |
 |--------|-----|-----|
-| **Hierarchy** | Fixed (gold sentences/sections) | Learned (H-Net-style routers) |
-| **Depth** | Fixed 2 levels | Variable K levels (2, 3, 4, or more) |
+| **Hierarchy** | Fixed linguistic (sentences/sections) | Learned via H-Net routers |
+| **Depth** | Fixed 2 levels | Variable K levels (1, 2, 3, or more) |
 | **Architecture** | Fixed local/mid/global stages | Schedule-driven (configurable) |
 | **Preprocessing** | Requires NLTK sentence splitting | Raw text only |
-| **Boundaries** | Explicit [SEC] tokens | Soft router probabilities + STE |
-| **Supervision** | Structured input required | Fully unsupervised |
+| **Boundaries** | Explicit [SEC] tokens | Learned boundaries (cosine similarity + threshold) |
+| **Supervision** | Linguistic structure required | Fully unsupervised |
 | **Router Placement** | N/A | Configurable via `at_layer` |
 
 ## TODO
 
-- [ ] Implement actual Transformer blocks in `model.py`
-- [ ] Add LM head for MLM predictions
-- [ ] Complete sentence head extraction in `SentenceToSectionRouter`
-- [ ] Implement full child/parent/neighbour logic in attention biases
-- [ ] Add main training loop with optimizer and scheduler
+- [x] Implement Transformer blocks with xFormers memory-efficient attention
+- [x] Add MLM head with weight tying
+- [x] Implement generic K-level hierarchical attention with strict HDT sparsity
+- [x] Add H-Net routing with cosine similarity and ratio loss
+- [x] Implement full training loop with W&B logging
 - [ ] Implement data collator for dynamic batching
 - [ ] Add evaluation metrics and downstream tasks
+- [ ] Add support for variable sequence lengths within batch
 - [ ] Add checkpointing and resumption logic
 - [ ] Add logging with wandb/tensorboard

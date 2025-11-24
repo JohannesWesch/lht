@@ -3,7 +3,6 @@ Comprehensive pretraining script for LHT with W&B logging.
 
 This script implements the full training loop with:
 - Masked Language Modeling objective
-- Router hierarchy learning
 - Comprehensive W&B logging (metrics, gradients, visualizations)
 - Mixed precision training
 - Gradient accumulation
@@ -19,13 +18,14 @@ from typing import Dict, Optional
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
-import wandb
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer
+
+import wandb
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -35,11 +35,7 @@ from lht.dataset import load_lht_pretrain_dataset
 from lht.model import LHTEncoder
 from lht.training import compute_mlm_loss, mask_tokens_for_mlm
 from lht.utils import set_seed
-from lht.visualization import (
-    log_gradient_flow,
-    log_router_statistics,
-    log_sample_predictions,
-)
+from lht.visualization import log_gradient_flow, log_sample_predictions
 
 
 def get_linear_schedule_with_warmup(
@@ -287,7 +283,6 @@ def train_lht_pretrain(config_path: str, resume_from: Optional[str] = None):
     best_loss = float("inf")
     accumulated_loss = 0.0
     accumulated_mlm_loss = 0.0
-    accumulated_router_loss = 0.0
     tokens_processed = 0
     time_start = time.time()
 
@@ -326,8 +321,7 @@ def train_lht_pretrain(config_path: str, resume_from: Optional[str] = None):
 
                     # Compute losses
                     mlm_loss = compute_mlm_loss(outputs["mlm_logits"], labels)
-                    router_ratio_loss = outputs["router_ratio_loss"]
-                    loss = mlm_loss + router_ratio_loss
+                    loss = mlm_loss
 
                     # Scale loss for gradient accumulation
                     loss = loss / cfg.training.grad_accum_steps
@@ -341,7 +335,6 @@ def train_lht_pretrain(config_path: str, resume_from: Optional[str] = None):
                 # Accumulate metrics
                 accumulated_loss += loss.item() * cfg.training.grad_accum_steps
                 accumulated_mlm_loss += mlm_loss.item()
-                accumulated_router_loss += router_ratio_loss.item()
                 tokens_processed += attention_mask.sum().item()
 
                 # Gradient accumulation step
@@ -371,9 +364,6 @@ def train_lht_pretrain(config_path: str, resume_from: Optional[str] = None):
                         # Compute average losses
                         avg_loss = accumulated_loss / cfg.training.log_every
                         avg_mlm_loss = accumulated_mlm_loss / cfg.training.log_every
-                        avg_router_loss = (
-                            accumulated_router_loss / cfg.training.log_every
-                        )
 
                         # Compute throughput
                         time_elapsed = time.time() - time_start
@@ -392,7 +382,6 @@ def train_lht_pretrain(config_path: str, resume_from: Optional[str] = None):
                         log_dict = {
                             "train/loss": avg_loss,
                             "train/mlm_loss": avg_mlm_loss,
-                            "train/router_ratio_loss": avg_router_loss,
                             "train/learning_rate": current_lr,
                             "train/grad_norm": grad_norm.item(),
                             "train/throughput_tokens_per_sec": tokens_per_sec,
@@ -400,12 +389,6 @@ def train_lht_pretrain(config_path: str, resume_from: Optional[str] = None):
                             "train/step": global_step,
                             "train/epoch": epoch,
                         }
-
-                        # Router statistics
-                        router_stats = log_router_statistics(
-                            outputs["hierarchy"], attention_mask, cfg
-                        )
-                        log_dict.update(router_stats)
 
                         # Log to wandb
                         wandb.log(log_dict, step=global_step)
@@ -422,7 +405,6 @@ def train_lht_pretrain(config_path: str, resume_from: Optional[str] = None):
                         # Reset accumulators
                         accumulated_loss = 0.0
                         accumulated_mlm_loss = 0.0
-                        accumulated_router_loss = 0.0
                         tokens_processed = 0
                         time_start = time.time()
 

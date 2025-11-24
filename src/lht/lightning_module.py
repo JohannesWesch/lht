@@ -26,8 +26,8 @@ class LHTLightningModule(LightningModule):
         # Important: set automatic_optimization to True (default) for simple mixed precision handling
         # self.automatic_optimization = True
 
-    def forward(self, input_ids, attention_mask=None):
-        return self.model(input_ids, attention_mask=attention_mask)
+    def forward(self, input_ids, attention_mask=None, coords=None):
+        return self.model(input_ids, attention_mask=attention_mask, coords=coords)
 
     def training_step(self, batch, batch_idx):
         # Batch from DataCollatorForLanguageModeling is already masked if mlm=True
@@ -35,20 +35,31 @@ class LHTLightningModule(LightningModule):
         input_ids = batch["input_ids"]
         attention_mask = batch["attention_mask"]
         labels = batch["labels"]
+        # Extract coords if present (added by HierarchicalDataCollator)
+        coords = batch.get("coords", None)
 
         # Forward pass
-        outputs = self(input_ids, attention_mask=attention_mask)
+        outputs = self(input_ids, attention_mask=attention_mask, coords=coords)
 
         # Compute loss
         loss = compute_mlm_loss(outputs["mlm_logits"], labels)
 
-        # Logging
-        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        # Logging with explicit batch size
+        batch_size = input_ids.shape[0]
+        self.log(
+            "train/loss",
+            loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=batch_size,
+        )
         self.log(
             "train/lr",
             self.lr_schedulers().get_last_lr()[0],
             on_step=True,
             prog_bar=False,
+            batch_size=batch_size,
         )
 
         return loss
@@ -57,11 +68,20 @@ class LHTLightningModule(LightningModule):
         input_ids = batch["input_ids"]
         attention_mask = batch["attention_mask"]
         labels = batch["labels"]
+        coords = batch.get("coords", None)
 
-        outputs = self(input_ids, attention_mask=attention_mask)
+        outputs = self(input_ids, attention_mask=attention_mask, coords=coords)
         loss = compute_mlm_loss(outputs["mlm_logits"], labels)
 
-        self.log("val/loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+        batch_size = input_ids.shape[0]
+        self.log(
+            "val/loss",
+            loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=batch_size,
+        )
         return loss
 
     def configure_optimizers(self):

@@ -14,6 +14,7 @@ from .coord_builders import (
     build_two_level_coords,
 )
 from .full_encoder import GeometricLHTEncoder
+from .seeding import set_seed
 from .verification import verify_parent_child_distances
 from .visualization import visualize_coords
 
@@ -24,4 +25,5 @@ __all__ = [
     "verify_parent_child_distances",
     "visualize_coords",
     "GeometricLHTEncoder",
+    "set_seed",
 ]

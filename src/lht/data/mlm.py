@@ -4,10 +4,13 @@ import torch
 from datasets import load_dataset
 
 # from src.HDT import HDTTokenizer
+from torch.utils.data import IterableDataset
 from torch.utils.data.dataloader import DataLoader
 
 # from src.utils import module_to_dict
 from transformers import AutoTokenizer, DataCollatorForLanguageModeling
+
+from lht.utils.nested_builder import build_coords_from_nested_list
 
 from .basic import BasicDataModule
 
@@ -15,6 +18,89 @@ from .basic import BasicDataModule
 # from src.utils import *
 
 log = logging.getLogger(__name__)
+
+
+class HierarchicalDataCollator(DataCollatorForLanguageModeling):
+    """
+    Collator that handles:
+    1. Tokenizing nested list data on-the-fly (or receiving pre-tokenized data with coords).
+    2. Padding input_ids.
+    3. Masking tokens for MLM.
+    4. Collate geometric coordinates (pad/batch).
+    """
+
+    def __init__(self, tokenizer, mlm_probability=0.15, max_length=8192):
+        super().__init__(tokenizer=tokenizer, mlm=True, mlm_probability=mlm_probability)
+        self.max_length = max_length
+
+    def torch_call(self, examples):
+        batch_input_ids = []
+        batch_coords = []
+
+        for ex in examples:
+            if isinstance(ex, dict) and "text" in ex:
+                doc = ex["text"]
+            else:
+                doc = ex
+
+            input_ids, coords = build_coords_from_nested_list(
+                doc, self.tokenizer, max_length=self.max_length
+            )
+
+            batch_input_ids.append(torch.tensor(input_ids, dtype=torch.long))
+            batch_coords.append(coords)
+
+        batch_input_ids_padded = torch.nn.utils.rnn.pad_sequence(
+            batch_input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
+        )
+
+        batch = super().torch_call([{"input_ids": t} for t in batch_input_ids_padded])
+
+        max_len = batch_input_ids_padded.size(1)
+        batch_levels = []
+        batch_times = []
+
+        from lht.core.attention import GeometricCoordinates
+
+        for c in batch_coords:
+            levels = c.levels
+            times = c.logical_times
+
+            current_len = len(levels)
+            if current_len < max_len:
+                # Pad to max_len
+                padding_len = max_len - current_len
+                levels = torch.cat(
+                    [
+                        levels,
+                        torch.zeros(
+                            padding_len, dtype=levels.dtype, device=levels.device
+                        ),
+                    ]
+                )
+                times = torch.cat(
+                    [
+                        times,
+                        torch.zeros(
+                            padding_len, dtype=times.dtype, device=times.device
+                        ),
+                    ]
+                )
+            elif current_len > max_len:
+                # Truncate to max_len
+                levels = levels[:max_len]
+                times = times[:max_len]
+
+            batch_levels.append(levels)
+            batch_times.append(times)
+
+        batch["coords"] = GeometricCoordinates(
+            levels=torch.stack(batch_levels),
+            logical_times=torch.stack(batch_times),
+            physical_positions=None,
+        )
+
+        return batch
 
 
 class MLMDataModule(BasicDataModule):
@@ -37,14 +123,22 @@ class MLMDataModule(BasicDataModule):
 
     def setup(self, stage: str) -> None:
         self.tokenizer = AutoTokenizer.from_pretrained(
-            self.config.data.tokenizer_name_or_path
+            self.config.data.tokenizer_name_or_path,
+            model_max_length=self.config.data.max_seq_len,
         )
-        # self.data_collator = DataCollatorForMaskedLanguageModeling(self.tokenizer, CONFIG.cfg_data.mlm_probability, input_max_length=CONFIG.cfg_data.model_max_length, hierarchical=CONFIG.hierarchical)
-        self.data_collator = DataCollatorForLanguageModeling(
-            tokenizer=self.tokenizer,
-            mlm=True,
-            mlm_probability=self.config.training.mlm_probability,
-        )
+
+        if self.config.model.geometry:
+            self.data_collator = HierarchicalDataCollator(
+                tokenizer=self.tokenizer,
+                mlm_probability=self.config.training.mlm_probability,
+                max_length=self.config.data.max_seq_len,
+            )
+        else:
+            self.data_collator = DataCollatorForLanguageModeling(
+                tokenizer=self.tokenizer,
+                mlm=True,
+                mlm_probability=self.config.training.mlm_probability,
+            )
 
         if stage == "fit":
             corpus_list = []
@@ -87,16 +181,34 @@ class HierarchicalMLMDataModule(MLMDataModule):
     def _log_tokenization(self, train_dataset):
         # hdt_tokenizer = HDTTokenizer(self.tokenizer, CONFIG.cfg_data.model_max_length)
         # 4) Log overviews so we always know what's going on with weird tokenization tricks
-        random_sentence_idx = torch.randint(0, len(train_dataset), (1,)).item()
-        input_data = train_dataset[random_sentence_idx]["text"]
-        # .squeeze()  # squeeze because hf has leading dim
-        dataset_size = len(train_dataset)
+
+        # Handle IterableDataset which doesn't support len() or random access
+        try:
+            # Try to take the first item
+            if isinstance(train_dataset, IterableDataset):
+                input_data = next(iter(train_dataset))["text"]
+                dataset_size_str = "unknown (streaming)"
+            else:
+                random_sentence_idx = torch.randint(0, len(train_dataset), (1,)).item()
+                input_data = train_dataset[random_sentence_idx]["text"]
+                dataset_size_str = f"{len(train_dataset):,}"
+
+        except (TypeError, StopIteration):
+            # Fallback if empty or not iterable
+            log.warning(
+                "Could not log tokenization sample: dataset is empty or not iterable."
+            )
+            return
 
         log.info(
-            f"Random sentence with seq_length {self.config.data.max_seq_len} from dataset of size {dataset_size:,}: ..."
+            f"Sample sentence with seq_length {self.config.data.max_seq_len} from dataset of size {dataset_size_str}: ..."
         )
-        log.info(input_data)
+        # input_data is a list of lists (nested structure), convert to string for logging
+        log.info(str(input_data)[:500] + "...")
         log.info("... is tokenized into ...")
-        # tokenized_doc = hdt_tokenizer(input_data)["input_ids"]
-        tokenized_doc = self.tokenizer(input_data)["input_ids"]
-        log.info(" ".join(self.tokenizer.decode(t) for t in tokenized_doc))
+
+        # Build coords to get flat input_ids for logging
+        input_ids, _ = build_coords_from_nested_list(
+            input_data, self.tokenizer, max_length=512  # Limit for logging
+        )
+        log.info(" ".join(self.tokenizer.decode(t) for t in input_ids))

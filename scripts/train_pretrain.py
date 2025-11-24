@@ -10,13 +10,16 @@ This script implements the full training loop using PyTorch Lightning Trainer:
 """
 
 import argparse
+import os
 import sys
+import warnings
 from pathlib import Path
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytorch_lightning as pl
+import torch
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 
@@ -28,6 +31,24 @@ from lht.utils import set_seed
 
 def main():
     """CLI entry point for training."""
+    # Set environment variables to suppress warnings
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"  # Avoid tokenizer fork warnings
+
+    # Suppress warnings
+    warnings.filterwarnings(
+        "ignore",
+        message="Token indices sequence length is longer than the.*",
+        category=UserWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=".*Precision.*is not supported by the model summary.*",
+        category=UserWarning,
+    )
+
+    # Set TF32 precision for better performance on H100/A100 GPUs
+    torch.set_float32_matmul_precision("medium")
+
     parser = argparse.ArgumentParser(
         description="Train LHT with MLM pretraining (PyTorch Lightning)"
     )
@@ -109,6 +130,7 @@ def main():
         devices=1,  # Adjust based on your setup or config
         log_every_n_steps=cfg.training.log_every,
         val_check_interval=cfg.training.eval_every,
+        limit_val_batches=50,  # Only validate on 50 batches (faster, prevents infinite iteration)
     )
 
     # Start Training

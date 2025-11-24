@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 # from src.utils.tokenization import construct_tokenizer
-from datasets import Dataset, concatenate_datasets
+from datasets import Dataset, IterableDataset, concatenate_datasets
 from pytorch_lightning import LightningDataModule
 from torch.utils.data.dataloader import DataLoader
 
@@ -87,28 +87,38 @@ class BasicDataModule(LightningDataModule):
         raise NotImplementedError
 
     def train_dataloader(self) -> DataLoader:
+        # IterableDataset doesn't support DistributedSampler or shuffle
+        is_iterable = isinstance(self.data_train, IterableDataset)
+
         sampler = (
             torch.utils.data.distributed.DistributedSampler(
                 self.data_train, drop_last=True
             )
-            if self.multi_gpu
+            if self.multi_gpu and not is_iterable
             else None
         )
+
+        # IterableDataset doesn't support shuffle parameter
+        shuffle = (sampler is None) and not is_iterable
+
         return DataLoader(
             self.data_train,
             batch_size=self.config.training.batch_size,
-            shuffle=(sampler is None),
+            shuffle=shuffle,
             num_workers=self.config.data.num_workers,
             collate_fn=self.data_collator,
             sampler=sampler,
         )
 
     def val_dataloader(self) -> DataLoader:
+        # IterableDataset doesn't support DistributedSampler
+        is_iterable = isinstance(self.data_val, IterableDataset)
+
         sampler = (
             torch.utils.data.distributed.DistributedSampler(
                 self.data_val, drop_last=False, shuffle=False
             )
-            if self.multi_gpu
+            if self.multi_gpu and not is_iterable
             else None
         )
         return DataLoader(
@@ -120,11 +130,14 @@ class BasicDataModule(LightningDataModule):
         )
 
     def test_dataloader(self) -> DataLoader:
+        # IterableDataset doesn't support DistributedSampler
+        is_iterable = isinstance(self.data_test, IterableDataset)
+
         sampler = (
             torch.utils.data.distributed.DistributedSampler(
                 self.data_test, drop_last=False, shuffle=False
             )
-            if self.multi_gpu
+            if self.multi_gpu and not is_iterable
             else None
         )
         return DataLoader(
@@ -139,7 +152,12 @@ class BasicDataModule(LightningDataModule):
         return self.tokenizer(raw_data["text"])
 
     def _concatenate_datasets(self, corpus_list):
-        raw_data = concatenate_datasets(corpus_list).shuffle(seed=self.config.seed)
+        raw_data = concatenate_datasets(corpus_list)
+
+        # Only shuffle if it's not an IterableDataset
+        if not isinstance(raw_data, IterableDataset):
+            raw_data = raw_data.shuffle(seed=self.config.seed)
+
         # if not isinstance(raw_data, IterableDataset) and CONFIG.cfg_data.max_entries_in_raw_dataset < len(raw_data):
         #    raw_data = raw_data.select(range(int(CONFIG.cfg_data.max_entries_in_raw_dataset)))
         # raw_data = raw_data.remove_columns([col for col in raw_data.column_names if col not in ["text", "label"]])

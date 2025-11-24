@@ -22,5 +22,13 @@ def compute_mlm_loss(
     Returns:
         loss: scalar
     """
-    loss_fct = torch.nn.CrossEntropyLoss()
-    return loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
+    # CrossEntropyLoss with default reduction='mean' averages over all valid (non -100) positions
+    loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="mean")
+
+    # Flatten for loss computation
+    shift_logits = logits.view(-1, logits.size(-1))
+    shift_labels = labels.view(-1)
+
+    # Compute loss
+    loss = loss_fct(shift_logits, shift_labels)
+    return loss

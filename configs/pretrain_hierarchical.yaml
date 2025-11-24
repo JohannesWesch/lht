@@ -1,0 +1,68 @@
+experiment_name: "lht_hierarchical_pretrain"
+seed: 42
+device: "cuda"
+
+wandb:
+  project: "lht"
+  entity: null  # set to your wandb username/team
+  name: null  # defaults to experiment_name if null
+  tags: ["hierarchical", "geometric-attention", "mlm"]
+  log_model: false
+  watch_model: "gradients"
+  watch_freq: 1000
+  offline: false
+
+model:
+  vocab_size: 30522  # BERT tokenizer vocab size (use 32768 with custom tokenizer later)
+  d_model: 768  # Match HDT-E (was 512)
+  n_heads: 12  # Match HDT-E (was 8)
+  num_layers: 12
+  d_ff: 3072  # Match HDT-E: 4 * d_model (was 2048)
+  dropout: 0.1
+  max_seq_len: 8192  # Long context for documents
+  rope: true
+
+  geometry:
+    num_levels: 3  # 0=token, 1=sentence, 2=section
+    manhattan_radius: 1  # Fixed parent-child connectivity
+    window_size_per_level: [256, 64, 16]  # tokens, sentences, sections
+    layer_max_level:
+      - 2
+      - 2
+      - 2
+      - 2
+      - 2
+      - 2
+      - 2
+      - 2
+      - 2
+      - 2
+      - 2
+      - 2
+
+training:
+  task: "mlm"
+  batch_size: 2  # Smaller batch due to larger model (768 hidden dim)
+  grad_accum_steps: 16  # Effective batch size = 8 * 8 = 64
+  num_steps: 100000
+  warmup_steps: 10000
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  log_every: 10  # Log more frequently to see losses sooner in wandb
+  save_every: 5000
+  eval_every: 1000
+  mixed_precision: "bf16-mixed"  # Use PyTorch Lightning's format
+  mlm_probability: 0.15
+
+data:
+  text_column: "text"  # Placeholder, will handle nested structure directly
+  num_workers: 4
+  shuffle_buffer_size: 10000
+  max_seq_len: 8192
+  tokenizer_name_or_path: "google-bert/bert-base-uncased"  # HDT uses BERT tokenizer for simplicity
+  ds_info:
+    - path: "howey/wiki_en"
+      split: "train"
+      streaming: true
+    # Add unarXive and HUPD here when ready

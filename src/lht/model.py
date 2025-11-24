@@ -2,7 +2,7 @@
 Core LHT encoder architecture.
 
 This module defines LHTEncoder with:
-- Stack of transformer layers
+- Stack of GeometricTransformerBlock layers
 - Token embeddings and MLM head
 """
 
@@ -10,76 +10,9 @@ from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
-from xformers.ops import memory_efficient_attention
 
-
-class LHTTransformerBlock(nn.Module):
-    """
-    Single Transformer block for LHT.
-
-    Uses xFormers memory_efficient_attention.
-    Input/Output: [B, N, D]
-    """
-
-    def __init__(self, d_model: int, n_heads: int, d_ff: int, dropout: float):
-        super().__init__()
-        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
-
-        # QKV projections and output projection
-        self.qkv = nn.Linear(d_model, 3 * d_model)
-        self.out_proj = nn.Linear(d_model, d_model)
-
-        # Feed-forward network
-        self.ff = nn.Sequential(
-            nn.Linear(d_model, d_ff),
-            nn.GELU(),
-            nn.Linear(d_ff, d_model),
-        )
-
-        # Layer norms
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-
-        # Dropout
-        self.dropout_attn = nn.Dropout(dropout)
-        self.dropout_ff = nn.Dropout(dropout)
-
-    def forward(
-        self,
-        x: torch.Tensor,  # [B, N, D]
-        attention_mask: Optional[torch.Tensor] = None,  # [B, N], currently unused
-    ) -> torch.Tensor:
-        # ---- Self-attention ----
-        residual = x
-        x_norm = self.norm1(x)
-
-        # Project to Q, K, V
-        qkv = self.qkv(x_norm)  # [B, N, 3*D]
-        B, N, _ = qkv.shape
-        qkv = qkv.view(B, N, 3, self.n_heads, self.head_dim)
-        q, k, v = qkv.unbind(dim=2)  # each [B, N, H, Dh]
-
-        # xFormers expects [B, N, H, Dh]
-        attn_out = memory_efficient_attention(q, k, v)  # [B, N, H, Dh]
-
-        # Merge heads back
-        attn_out = attn_out.reshape(B, N, self.d_model)
-        attn_out = self.out_proj(attn_out)
-        attn_out = self.dropout_attn(attn_out)
-
-        x = residual + attn_out
-
-        # ---- Feed-forward ----
-        residual = x
-        x_norm = self.norm2(x)
-        ff_out = self.ff(x_norm)
-        ff_out = self.dropout_ff(ff_out)
-        x = residual + ff_out
-
-        return x
+from lht.core.attention import GeometricCoordinates
+from lht.core.model import GeometricTransformerBlock
 
 
 class LHTEncoder(nn.Module):
@@ -100,31 +33,53 @@ class LHTEncoder(nn.Module):
         # Access model config properly
         model_cfg = config.model if hasattr(config, "model") else config
 
-        # Embeddings
+        # We enforce geometric attention now.
+        if getattr(model_cfg, "geometry", None) is None:
+            raise ValueError("LHTEncoder now requires a 'geometry' config block.")
+
+        # Embeddings with proper initialization (BERT-style)
         self.token_embed = nn.Embedding(model_cfg.vocab_size, model_cfg.d_model)
+        nn.init.normal_(self.token_embed.weight, mean=0.0, std=0.02)
         self.pos_embed = None  # you may use RoPE instead of absolute embeddings
 
         # Stack of transformer layers
-        self.layers = nn.ModuleList(
-            [
-                LHTTransformerBlock(
-                    model_cfg.d_model,
-                    model_cfg.n_heads,
-                    model_cfg.d_ff,
-                    model_cfg.dropout,
-                )
-                for _ in range(model_cfg.num_layers)
-            ]
-        )
+        layers = []
+        for i in range(model_cfg.num_layers):
+            # Use Geometric Attention for ALL layers
+            layer_max_level = (
+                model_cfg.geometry.layer_max_level[i]
+                if i < len(model_cfg.geometry.layer_max_level)
+                else None
+            )
+            layer_radius = model_cfg.geometry.manhattan_radius
 
-        # MLM head with weight tying
+            layers.append(
+                GeometricTransformerBlock(
+                    d_model=model_cfg.d_model,
+                    n_heads=model_cfg.n_heads,
+                    d_ff=model_cfg.d_ff,
+                    dropout=model_cfg.dropout,
+                    manhattan_radius=layer_radius,
+                    layer_idx=i,
+                    layer_max_level=layer_max_level,
+                    window_size_per_level=model_cfg.geometry.window_size_per_level,
+                )
+            )
+
+        self.layers = nn.ModuleList(layers)
+
+        # Final layer norm (critical for stable logits!)
+        self.final_norm = nn.LayerNorm(model_cfg.d_model)
+
+        # MLM head with proper initialization (no weight tying for stability)
         self.mlm_head = nn.Linear(model_cfg.d_model, model_cfg.vocab_size, bias=False)
-        self.mlm_head.weight = self.token_embed.weight  # tie weights
+        nn.init.normal_(self.mlm_head.weight, mean=0.0, std=0.02)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        coords: Optional[GeometricCoordinates] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass through LHT encoder.
@@ -136,17 +91,31 @@ class LHTEncoder(nn.Module):
         """
         B, N = input_ids.shape
 
-        if attention_mask is None:
-            attention_mask = (input_ids != 0).long()
+        # Note: attention_mask is traditional padding mask.
+        # Geometric block uses BlockMask from FlexAttention which handles causal/sparse logic.
+        # But we still need to handle padding tokens so they don't attend or get attended to?
+        # create_geometric_mask in attention.py doesn't explicitly handle padding mask passed here.
+        # FlexAttention usually handles padding if BlockMask says so or via separate key_padding_mask (if supported).
+        # Currently, geometric_attention.py creates a mask based on coords.
+        # If padded tokens have valid coords (e.g. dummy coords), they might participate.
+        # Ideally, we should integrate attention_mask into geometric mask creation or pass it.
+
+        if coords is None:
+            raise ValueError(
+                "LHTEncoder requires 'coords' input for geometric attention."
+            )
 
         x = self.token_embed(input_ids)  # [B, N, D]
 
         # Process through all layers
         for layer in self.layers:
-            x = layer(x, attention_mask=attention_mask)
+            x = layer(x, coords=coords)
+
+        # Apply final layer norm before MLM head
+        x = self.final_norm(x)
 
         # MLM head projection
-        mlm_logits = self.mlm_head(x)  # [B, N, vocab_size]
+        mlm_logits = self.mlm_head(x)
 
         return {
             "hidden": x,

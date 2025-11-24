@@ -25,9 +25,9 @@ class GeometryConfig:
     """
 
     num_levels: int  # e.g. 3 → 0=token, 1=sent, 2=sec
-    manhattan_radius: int = 1  # Fixed geometric radius (usually 1)
     window_size_per_level: List[int]  # [512, 64, 16] = tokens, sentences, sections
     layer_max_level: List[int]  # len = num_layers, max active level per layer
+    manhattan_radius: int = 1  # Fixed geometric radius (usually 1)
 
 
 @dataclass
@@ -121,12 +121,18 @@ def load_config(path: str) -> ExperimentConfig:
     else:
         model_cfg = ModelConfig(**model_raw)
 
+    # Ensure numeric training values are properly typed
+    training_raw = raw["training"].copy()
+    training_raw["learning_rate"] = float(training_raw["learning_rate"])
+    training_raw["weight_decay"] = float(training_raw["weight_decay"])
+    training_raw["mlm_probability"] = float(training_raw.get("mlm_probability", 0.15))
+
     return ExperimentConfig(
         experiment_name=raw["experiment_name"],
         seed=raw["seed"],
         device=raw["device"],
         model=model_cfg,
-        training=TrainingConfig(**raw["training"]),
+        training=TrainingConfig(**training_raw),
         data=DataConfig(**raw["data"]),
         wandb=wandb_cfg,
     )

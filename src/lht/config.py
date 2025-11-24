@@ -71,6 +71,9 @@ class DataConfig:
     sources: Optional[List[str]] = None
     sampling_probs: Optional[List[float]] = None
     dataset_name: Optional[str] = None  # for backward compatibility
+    ds_info: Optional[List[dict]] = None
+    model_max_length: Optional[int] = None
+    tok_name: Optional[str] = None
 
 
 @dataclass

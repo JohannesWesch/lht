@@ -40,11 +40,6 @@ from .core import (
 )
 
 # ============================================================================
-# LEGACY (kept for backwards compatibility)
-# ============================================================================
-from .routers import LevelRouter
-
-# ============================================================================
 # UTILS (Convenience and debugging)
 # ============================================================================
 from .utils import (
@@ -78,6 +73,4 @@ __all__ = [
     "verify_parent_child_distances",
     "visualize_coords",
     "GeometricLHTEncoder",
-    # Legacy
-    "LevelRouter",
 ]

@@ -29,8 +29,14 @@ from lht.lightning_module import LHTLightningModule
 from lht.utils import set_seed
 
 
-def main():
-    """CLI entry point for training."""
+def train_lht_pretrain(config_path: str, resume_from: str = None):
+    """
+    Train LHT with masked language modeling pretraining.
+
+    Args:
+        config_path: Path to YAML configuration file
+        resume_from: Optional path to checkpoint to resume from
+    """
     # Set environment variables to suppress warnings
     os.environ["TOKENIZERS_PARALLELISM"] = "false"  # Avoid tokenizer fork warnings
 
@@ -48,26 +54,6 @@ def main():
 
     # Set TF32 precision for better performance on H100/A100 GPUs
     torch.set_float32_matmul_precision("medium")
-
-    parser = argparse.ArgumentParser(
-        description="Train LHT with MLM pretraining (PyTorch Lightning)"
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="configs/pretrain_base.yaml",
-        help="Path to config YAML file",
-    )
-    parser.add_argument(
-        "--resume-from",
-        type=str,
-        default=None,
-        help="Path to checkpoint to resume from",
-    )
-
-    args = parser.parse_args()
-    config_path = args.config
-    resume_from = args.resume_from
 
     # Load config
     print(f"Loading config from {config_path}...")
@@ -136,6 +122,28 @@ def main():
     # Start Training
     print("Starting training...")
     trainer.fit(model, datamodule=data_module, ckpt_path=resume_from)
+
+
+def main():
+    """CLI entry point for training."""
+    parser = argparse.ArgumentParser(
+        description="Train LHT with MLM pretraining (PyTorch Lightning)"
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="configs/pretrain_base.yaml",
+        help="Path to config YAML file",
+    )
+    parser.add_argument(
+        "--resume-from",
+        type=str,
+        default=None,
+        help="Path to checkpoint to resume from",
+    )
+
+    args = parser.parse_args()
+    train_lht_pretrain(args.config, resume_from=args.resume_from)
 
 
 if __name__ == "__main__":

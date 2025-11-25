@@ -54,77 +54,107 @@ def create_hierarchical_mask(
     device: torch.device = None,
 ):
     """
-    Create vectorized cascading per-level sliding window masks.
+    Memory-efficient lazy hierarchical mask (vmap-safe, scalable to 128k+ tokens).
 
-    All levels checked simultaneously via:
-    1. Stack enumeration vectors
-    2. Vectorized participation + distance checks
-    3. OR reduction (any level allows = can attend)
+    Uses loop unrolling to avoid advanced slicing on captured tensors,
+    fixing the 'vmap ... .item()' error.
+
+    Instead of pre-computing an [N, N] matrix (which would be 16GB for N=128k),
+    this captures a list of [B, N] enumeration tensors and computes the boolean
+    logic on-the-fly inside the FlexAttention kernel.
+
+    Complexity:
+    - Memory: O(L * N) - Linear scaling!
+    - Compute: O(1) per attention pair (fused into kernel)
+
+    For each query-key pair, checks all levels:
+        - enum_q[ℓ] != 0 and enum_k[ℓ] != 0 (both participate)
+        - |enum_q[ℓ] - enum_k[ℓ]| <= window_size[ℓ] (within window)
+    Then OR across levels (cascading).
 
     Args:
         positions: HierarchicalPositions with sparse enumeration vectors
         window_size_per_level: [256, 64, 16] for tokens/sentences/sections
         max_level: Maximum active level (None = all levels)
-        batch_size: batch size
-        num_heads: number of attention heads
-        device: torch device
+        batch_size: Batch size for BlockMask
+        num_heads: Number of attention heads
+        device: Target device (GPU) for attention computation
 
     Returns:
-        FlexAttention BlockMask with cascading OR-merged windows
+        FlexAttention BlockMask with lazy evaluation
     """
     device = device or positions.level_enums[0].device
 
-    # Determine active levels
+    # 1. Determine active levels
     num_active = (
         (max_level + 1) if max_level is not None else len(positions.level_enums)
     )
 
-    # Stack enums: [Num_Levels, Seq_Len] or [Num_Levels, B, Seq_Len]
-    stacked_enums = torch.stack(positions.level_enums[:num_active], dim=0).to(device)
+    # 2. Prepare enumeration tensors as a LIST of [B, N] tensors
+    # We do NOT stack them into [L, B, N] to avoid vmap slicing issues.
+    # Memory footprint: O(L * N) instead of O(N^2)!
+    raw_enums = positions.level_enums[:num_active]
+    processed_enums_list = []
 
-    # Window sizes: [Num_Levels] tensor
-    windows = torch.tensor(
-        window_size_per_level[:num_active], device=device, dtype=torch.long
-    )
-
-    has_batch_dim = stacked_enums.ndim == 3
-    seq_len = stacked_enums.shape[-1]
-
-    def hierarchical_mask_fn(b, h, q_idx, kv_idx):
-        """Vectorized: check all levels at once, OR-reduce.
-
-        Args:
-            b, h, q_idx, kv_idx: scalar indices
-        Returns:
-            scalar boolean indicating if query at q_idx can attend to key at kv_idx
-        """
-        # Fetch IDs for all levels: [Num_Levels]
-        if has_batch_dim:
-            q_ids = stacked_enums[:, b, q_idx]
-            kv_ids = stacked_enums[:, b, kv_idx]
+    for e in raw_enums:
+        e = e.to(device)  # Move to target device
+        if e.ndim == 1:
+            # [N] -> [1, N] -> [B, N]
+            e = e.unsqueeze(0).expand(batch_size, -1)
         else:
-            q_ids = stacked_enums[:, q_idx]
-            kv_ids = stacked_enums[:, kv_idx]
+            # [B, N] - ensure correct batch size
+            e = e if e.shape[0] == batch_size else e.expand(batch_size, -1)
+        processed_enums_list.append(e)
 
-        # 1. Participation: both must be non-zero
-        participates = (q_ids != 0) & (kv_ids != 0)
+    seq_len = processed_enums_list[0].shape[-1]
 
-        # 2. Distance check: within window (enumeration space)
-        dists = torch.abs(q_ids - kv_ids)
-        in_window = dists <= windows
+    # Store window sizes for the closure (plain Python list for vmap safety)
+    active_windows = window_size_per_level[:num_active]
 
-        # 3. Combine: participate AND in_window for each level
-        valid_connections = participates & in_window
+    # 3. Lazy mask function with UNROLLED LOOP
+    # This avoids `dense_enums[:, b, q_idx]` which breaks vmap
+    def hierarchical_mask_fn(b, h, q_idx, kv_idx):
+        """
+        Iterates over levels explicitly (unrolled by compiler).
+        Uses simple [B, N] indexing which is vmap-safe.
+        """
+        final_condition = None
 
-        # 4. OR reduction: any level allows = can attend
-        return valid_connections.any()
+        # Iterate over the list of tensors (unrolled by compiler for small L)
+        for i, enum_tensor in enumerate(processed_enums_list):
+            window = active_windows[i]
 
+            # Standard indexing: [B, N][b, idx] - this is vmap-safe!
+            q_val = enum_tensor[b, q_idx]
+            k_val = enum_tensor[b, kv_idx]
+
+            # Participation: both must be non-zero
+            participates = (q_val != 0) & (k_val != 0)
+
+            # Distance check in enumeration space
+            dist = (q_val - k_val).abs()
+            in_window = dist <= window
+
+            # Valid for this level
+            valid_level = participates & in_window
+
+            # Accumulate via OR
+            if final_condition is None:
+                final_condition = valid_level
+            else:
+                final_condition = final_condition | valid_level
+
+        return final_condition
+
+    # 4. Create BlockMask with lazy evaluation
+    # The mask function above is traced and fused into the attention kernel
     return create_block_mask(
         hierarchical_mask_fn,
         B=batch_size,
         H=num_heads,
         Q_LEN=seq_len,
         KV_LEN=seq_len,
+        device=device,
     )
 
 
@@ -171,9 +201,9 @@ def mlswa_attention(
     device = query.device
 
     # flex_attention expects [B, H, N, D] format, so we need to transpose
-    query = query.transpose(1, 2)  # [B, N, H, D] -> [B, H, N, D]
-    key = key.transpose(1, 2)  # [B, N, H, D] -> [B, H, N, D]
-    value = value.transpose(1, 2)  # [B, N, H, D] -> [B, H, N, D]
+    query = query.transpose(1, 2).contiguous()  # [B, N, H, D] -> [B, H, N, D]
+    key = key.transpose(1, 2).contiguous()  # [B, N, H, D] -> [B, H, N, D]
+    value = value.transpose(1, 2).contiguous()  # [B, N, H, D] -> [B, H, N, D]
 
     block_mask = create_hierarchical_mask(
         positions=positions,
@@ -188,6 +218,6 @@ def mlswa_attention(
     out = _compiled_mlswa_attention(query, key, value, block_mask)
 
     # Transpose back to [B, N, H, D] format
-    out = out.transpose(1, 2)  # [B, H, N, D] -> [B, N, H, D]
+    out = out.transpose(1, 2).contiguous()  # [B, H, N, D] -> [B, N, H, D]
 
     return out

@@ -26,8 +26,8 @@ class LHTLightningModule(LightningModule):
         # Important: set automatic_optimization to True (default) for simple mixed precision handling
         # self.automatic_optimization = True
 
-    def forward(self, input_ids, attention_mask=None, coords=None):
-        return self.model(input_ids, attention_mask=attention_mask, coords=coords)
+    def forward(self, input_ids, attention_mask=None, positions=None):
+        return self.model(input_ids, attention_mask=attention_mask, positions=positions)
 
     def training_step(self, batch, batch_idx):
         # Batch from DataCollatorForLanguageModeling is already masked if mlm=True
@@ -35,11 +35,11 @@ class LHTLightningModule(LightningModule):
         input_ids = batch["input_ids"]
         attention_mask = batch["attention_mask"]
         labels = batch["labels"]
-        # Extract coords if present (added by HierarchicalDataCollator)
-        coords = batch.get("coords", None)
+        # Extract positions if present (added by HierarchicalDataCollator)
+        positions = batch.get("positions", None)
 
         # Forward pass
-        outputs = self(input_ids, attention_mask=attention_mask, coords=coords)
+        outputs = self(input_ids, attention_mask=attention_mask, positions=positions)
 
         # Compute loss
         loss = compute_mlm_loss(outputs["mlm_logits"], labels)
@@ -68,9 +68,9 @@ class LHTLightningModule(LightningModule):
         input_ids = batch["input_ids"]
         attention_mask = batch["attention_mask"]
         labels = batch["labels"]
-        coords = batch.get("coords", None)
+        positions = batch.get("positions", None)
 
-        outputs = self(input_ids, attention_mask=attention_mask, coords=coords)
+        outputs = self(input_ids, attention_mask=attention_mask, positions=positions)
         loss = compute_mlm_loss(outputs["mlm_logits"], labels)
 
         batch_size = input_ids.shape[0]

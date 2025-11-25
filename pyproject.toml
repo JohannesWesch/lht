@@ -41,3 +41,6 @@ dev = [
 [project.scripts]
 lht-train-pretrain = "lht.main:cli_train_pretrain"
 lht-eval = "lht.main:cli_eval"
+
+[tool.ruff]
+exclude = ["tests/"]

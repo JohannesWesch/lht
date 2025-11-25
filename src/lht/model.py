@@ -2,7 +2,7 @@
 Core LHT encoder architecture.
 
 This module defines LHTEncoder with:
-- Stack of GeometricTransformerBlock layers
+- Stack of MLSWATransformerBlock layers with Multi-Level Sliding Window Attention
 - Token embeddings and MLM head
 """
 
@@ -11,8 +11,8 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
-from lht.core.attention import GeometricCoordinates
-from lht.core.model import GeometricTransformerBlock
+from lht.core.attention import HierarchicalPositions
+from lht.core.model import MLSWATransformerBlock
 
 
 class LHTEncoder(nn.Module):
@@ -33,9 +33,9 @@ class LHTEncoder(nn.Module):
         # Access model config properly
         model_cfg = config.model if hasattr(config, "model") else config
 
-        # We enforce geometric attention now.
-        if getattr(model_cfg, "geometry", None) is None:
-            raise ValueError("LHTEncoder now requires a 'geometry' config block.")
+        # We enforce ML-SWA (Multi-Level Sliding Window Attention) now.
+        if getattr(model_cfg, "mlswa", None) is None:
+            raise ValueError("LHTEncoder now requires an 'mlswa' config block.")
 
         # Embeddings with proper initialization (BERT-style)
         self.token_embed = nn.Embedding(model_cfg.vocab_size, model_cfg.d_model)
@@ -45,24 +45,22 @@ class LHTEncoder(nn.Module):
         # Stack of transformer layers
         layers = []
         for i in range(model_cfg.num_layers):
-            # Use Geometric Attention for ALL layers
+            # Use Multi-Level Sliding Window Attention (ML-SWA) for ALL layers
             layer_max_level = (
-                model_cfg.geometry.layer_max_level[i]
-                if i < len(model_cfg.geometry.layer_max_level)
+                model_cfg.mlswa.layer_max_level[i]
+                if i < len(model_cfg.mlswa.layer_max_level)
                 else None
             )
-            layer_radius = model_cfg.geometry.manhattan_radius
 
             layers.append(
-                GeometricTransformerBlock(
+                MLSWATransformerBlock(
                     d_model=model_cfg.d_model,
                     n_heads=model_cfg.n_heads,
                     d_ff=model_cfg.d_ff,
                     dropout=model_cfg.dropout,
-                    manhattan_radius=layer_radius,
                     layer_idx=i,
                     layer_max_level=layer_max_level,
-                    window_size_per_level=model_cfg.geometry.window_size_per_level,
+                    window_size_per_level=model_cfg.mlswa.window_size_per_level,
                 )
             )
 
@@ -79,7 +77,7 @@ class LHTEncoder(nn.Module):
         self,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        coords: Optional[GeometricCoordinates] = None,
+        positions: Optional[HierarchicalPositions] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass through LHT encoder.
@@ -92,24 +90,21 @@ class LHTEncoder(nn.Module):
         B, N = input_ids.shape
 
         # Note: attention_mask is traditional padding mask.
-        # Geometric block uses BlockMask from FlexAttention which handles causal/sparse logic.
-        # But we still need to handle padding tokens so they don't attend or get attended to?
-        # create_geometric_mask in attention.py doesn't explicitly handle padding mask passed here.
-        # FlexAttention usually handles padding if BlockMask says so or via separate key_padding_mask (if supported).
-        # Currently, geometric_attention.py creates a mask based on coords.
-        # If padded tokens have valid coords (e.g. dummy coords), they might participate.
-        # Ideally, we should integrate attention_mask into geometric mask creation or pass it.
+        # Cascading per-level attention uses BlockMask from FlexAttention.
+        # create_hierarchical_mask in attention.py creates mask based on positions.
+        # If padded tokens have valid positions (e.g. dummy positions), they might participate.
+        # Ideally, we should integrate attention_mask into hierarchical mask creation or pass it.
 
-        if coords is None:
+        if positions is None:
             raise ValueError(
-                "LHTEncoder requires 'coords' input for geometric attention."
+                "LHTEncoder requires 'positions' input for hierarchical attention."
             )
 
         x = self.token_embed(input_ids)  # [B, N, D]
 
         # Process through all layers
         for layer in self.layers:
-            x = layer(x, coords=coords)
+            x = layer(x, positions=positions)
 
         # Apply final layer norm before MLM head
         x = self.final_norm(x)

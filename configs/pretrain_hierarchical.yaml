@@ -6,7 +6,7 @@ wandb:
   project: "lht"
   entity: null  # set to your wandb username/team
   name: null  # defaults to experiment_name if null
-  tags: ["hierarchical", "geometric-attention", "mlm"]
+  tags: ["hierarchical", "mlswa", "mlm"]
   log_model: false
   watch_model: "gradients"
   watch_freq: 1000
@@ -22,10 +22,9 @@ model:
   max_seq_len: 8192  # Long context for documents
   rope: true
 
-  geometry:
+  mlswa:
     num_levels: 3  # 0=token, 1=sentence, 2=section
-    manhattan_radius: 1  # Fixed parent-child connectivity
-    window_size_per_level: [256, 64, 16]  # tokens, sentences, sections
+    window_size_per_level: [256, 64, 16]  # tokens, sentences, sections (enumeration distance)
     layer_max_level:
       - 2
       - 2
@@ -42,8 +41,8 @@ model:
 
 training:
   task: "mlm"
-  batch_size: 2  # Smaller batch due to larger model (768 hidden dim)
-  grad_accum_steps: 16  # Effective batch size = 8 * 8 = 64
+  batch_size: 4  # Smaller batch due to larger model (768 hidden dim)
+  grad_accum_steps: 16  # Effective batch size = 4 * 16 = 64
   num_steps: 100000
   warmup_steps: 1000  # Reduced from 10000 - 10% warmup is too long for 100k steps
   learning_rate: 0.0001

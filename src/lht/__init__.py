@@ -3,16 +3,15 @@ Learned Hierarchical Transformer (LHT).
 
 Clean separation: core/ and utils/
 
-CORE (~150 lines):
-    - core.attention: Geometric attention mechanism
-    - core.coords: Universal coordinate builder
-    - core.model: Transformer block (optional)
+CORE:
+    - core.attention: Multi-Level Sliding Window Attention (ML-SWA)
+    - core.model: MLSWATransformerBlock (single transformer layer)
 
 UTILS (extras):
-    - utils.coord_builders: Convenience builders
-    - utils.verification: Debug helpers
-    - utils.visualization: Simple visualization
-    - utils.full_encoder: Complete encoder (optional)
+    - utils.nested_builder: Document structure to hierarchical positions
+    - utils.seeding: Random seed utilities
+
+Main encoder model is in model.py (LHTEncoder).
 """
 
 # ============================================================================
@@ -21,7 +20,7 @@ UTILS (extras):
 from .config import (
     DataConfig,
     ExperimentConfig,
-    GeometryConfig,
+    MLSWAConfig,
     ModelConfig,
     TrainingConfig,
     WandbConfig,
@@ -32,34 +31,25 @@ from .config import (
 # CORE (Essential functionality)
 # ============================================================================
 from .core import (
-    GeometricCoordinates,
-    GeometricTransformerBlock,
-    build_coords,
-    create_geometric_mask,
-    geometric_attention,
+    HierarchicalPositions,
+    MLSWATransformerBlock,
+    create_hierarchical_mask,
+    mlswa_attention,
 )
 
 # ============================================================================
 # UTILS (Convenience and debugging)
 # ============================================================================
-from .utils import (
-    GeometricLHTEncoder,
-    build_flat_coords,
-    build_three_level_coords,
-    build_two_level_coords,
-    verify_parent_child_distances,
-    visualize_coords,
-)
+from .utils import build_coords_from_nested_list, set_seed
 
 __all__ = [
     # Core (essentials)
-    "GeometricCoordinates",
-    "geometric_attention",
-    "create_geometric_mask",
-    "build_coords",
-    "GeometricTransformerBlock",
+    "HierarchicalPositions",
+    "mlswa_attention",
+    "create_hierarchical_mask",
+    "MLSWATransformerBlock",
     # Config
-    "GeometryConfig",
+    "MLSWAConfig",
     "ModelConfig",
     "TrainingConfig",
     "DataConfig",
@@ -67,10 +57,6 @@ __all__ = [
     "ExperimentConfig",
     "load_config",
     # Utils (extras)
-    "build_two_level_coords",
-    "build_three_level_coords",
-    "build_flat_coords",
-    "verify_parent_child_distances",
-    "visualize_coords",
-    "GeometricLHTEncoder",
+    "build_coords_from_nested_list",
+    "set_seed",
 ]

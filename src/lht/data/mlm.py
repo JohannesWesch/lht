@@ -23,10 +23,10 @@ log = logging.getLogger(__name__)
 class HierarchicalDataCollator(DataCollatorForLanguageModeling):
     """
     Collator that handles:
-    1. Tokenizing nested list data on-the-fly (or receiving pre-tokenized data with coords).
+    1. Tokenizing nested list data on-the-fly (or receiving pre-tokenized data with positions).
     2. Padding input_ids.
     3. Masking tokens for MLM.
-    4. Collate geometric coordinates (pad/batch).
+    4. Collate hierarchical positions (pad/batch).
     """
 
     def __init__(self, tokenizer, mlm_probability=0.15, max_length=8192):
@@ -57,48 +57,41 @@ class HierarchicalDataCollator(DataCollatorForLanguageModeling):
         batch = super().torch_call([{"input_ids": t} for t in batch_input_ids_padded])
 
         max_len = batch_input_ids_padded.size(1)
-        batch_levels = []
-        batch_times = []
 
-        from lht.core.attention import GeometricCoordinates
+        from lht.core.attention import HierarchicalPositions
 
-        for c in batch_coords:
-            levels = c.levels
-            times = c.logical_times
+        # Pad/truncate each level's enumeration vectors
+        num_levels = batch_coords[0].num_levels if batch_coords else 3
+        batched_level_enums = [[] for _ in range(num_levels)]
 
-            current_len = len(levels)
-            if current_len < max_len:
-                # Pad to max_len
-                padding_len = max_len - current_len
-                levels = torch.cat(
-                    [
-                        levels,
-                        torch.zeros(
-                            padding_len, dtype=levels.dtype, device=levels.device
-                        ),
-                    ]
-                )
-                times = torch.cat(
-                    [
-                        times,
-                        torch.zeros(
-                            padding_len, dtype=times.dtype, device=times.device
-                        ),
-                    ]
-                )
-            elif current_len > max_len:
-                # Truncate to max_len
-                levels = levels[:max_len]
-                times = times[:max_len]
+        for positions in batch_coords:
+            for level_idx in range(num_levels):
+                level_enum = positions.level_enums[level_idx]
+                current_len = len(level_enum)
 
-            batch_levels.append(levels)
-            batch_times.append(times)
+                if current_len < max_len:
+                    # Pad with zeros (non-participants)
+                    padding_len = max_len - current_len
+                    level_enum = torch.cat(
+                        [
+                            level_enum,
+                            torch.zeros(
+                                padding_len,
+                                dtype=level_enum.dtype,
+                                device=level_enum.device,
+                            ),
+                        ]
+                    )
+                elif current_len > max_len:
+                    # Truncate
+                    level_enum = level_enum[:max_len]
 
-        batch["coords"] = GeometricCoordinates(
-            levels=torch.stack(batch_levels),
-            logical_times=torch.stack(batch_times),
-            physical_positions=None,
-        )
+                batched_level_enums[level_idx].append(level_enum)
+
+        # Stack into [B, N] tensors for each level
+        stacked_enums = [torch.stack(level_list) for level_list in batched_level_enums]
+
+        batch["positions"] = HierarchicalPositions(stacked_enums)
 
         return batch
 
@@ -127,7 +120,7 @@ class MLMDataModule(BasicDataModule):
             model_max_length=self.config.data.max_seq_len,
         )
 
-        if self.config.model.geometry:
+        if self.config.model.mlswa:
             self.data_collator = HierarchicalDataCollator(
                 tokenizer=self.tokenizer,
                 mlm_probability=self.config.training.mlm_probability,

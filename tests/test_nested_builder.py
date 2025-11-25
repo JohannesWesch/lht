@@ -1,8 +1,8 @@
 """
-Test suite for nested document to coordinates pipeline.
+Test suite for nested document to hierarchical positions pipeline.
 
 Tests the build_coords_from_nested_list() function which converts
-nested document structure into flat token sequences with geometric coordinates.
+nested document structure into flat token sequences with sparse enumeration vectors.
 """
 
 import pytest
@@ -22,35 +22,50 @@ def test_single_section_single_sentence(tokenizer):
     """Test simplest case: one section with one sentence."""
     document = [["Hello world"]]
 
-    input_ids, coords = build_coords_from_nested_list(document, tokenizer)
+    input_ids, positions = build_coords_from_nested_list(document, tokenizer)
 
     # Should have tokens
     assert len(input_ids) > 0, "Should have some tokens"
 
-    # Coordinates should match input_ids length (one coord per token, no hierarchy nodes)
-    assert len(coords.levels) == len(input_ids), "Coords should match input_ids length"
+    # Positions should have 3 levels
+    assert positions.num_levels == 3, "Should have 3 hierarchy levels"
 
-    # All tokens should be at level 0
-    assert torch.all(coords.levels == 0), "All tokens should be at level 0"
-
-    # All tokens in same sentence should have same logical_time (sentence_id=0)
+    # Level 0: all tokens should be enumerated (1, 2, 3, ...)
+    level_0 = positions.level_enums[0]
+    assert len(level_0) == len(input_ids), "Level 0 should match input_ids length"
     assert torch.all(
-        coords.logical_times == 0
-    ), "All tokens should have x=0 (sentence 0)"
+        level_0 > 0
+    ), "All tokens should have non-zero enumeration at level 0"
+
+    # Level 1: only last token should be enumerated (sentence boundary)
+    level_1 = positions.level_enums[1]
+    assert torch.sum(level_1 > 0) == 1, "Should have 1 sentence boundary"
+    assert level_1[-1] > 0, "Last token should be sentence boundary"
+
+    # Level 2: last token should also be section boundary
+    level_2 = positions.level_enums[2]
+    assert torch.sum(level_2 > 0) == 1, "Should have 1 section boundary"
+    assert level_2[-1] > 0, "Last token should be section boundary"
 
 
 def test_single_section_multiple_sentences(tokenizer):
     """Test one section with multiple sentences."""
     document = [["Hello world", "How are you", "Fine thanks"]]
 
-    input_ids, coords = build_coords_from_nested_list(document, tokenizer)
+    input_ids, positions = build_coords_from_nested_list(document, tokenizer)
 
     assert len(input_ids) > 0
 
-    # Should have tokens from 3 sentences
-    # Each token's logical_time should be its sentence_id
-    unique_times = torch.unique(coords.logical_times)
-    assert len(unique_times) == 3, "Should have 3 different sentence IDs (0, 1, 2)"
+    # Should have 3 sentence boundaries (level 1)
+    level_1 = positions.level_enums[1]
+    num_sentence_boundaries = torch.sum(level_1 > 0).item()
+    assert num_sentence_boundaries == 3, "Should have 3 sentence boundaries"
+
+    # Should have sequential enumeration at boundaries: 1, 2, 3
+    boundary_values = level_1[level_1 > 0]
+    assert torch.all(
+        boundary_values == torch.tensor([1, 2, 3])
+    ), "Should have sequential sentence IDs"
 
 
 def test_multiple_sections_multiple_sentences(tokenizer):
@@ -60,41 +75,46 @@ def test_multiple_sections_multiple_sentences(tokenizer):
         ["Sentence 1 in section 2", "Sentence 2 in section 2"],
     ]
 
-    input_ids, coords = build_coords_from_nested_list(document, tokenizer)
+    input_ids, positions = build_coords_from_nested_list(document, tokenizer)
 
     assert len(input_ids) > 0
 
-    # Should have 4 sentences total
-    unique_times = torch.unique(coords.logical_times)
-    assert len(unique_times) == 4, "Should have 4 sentence IDs"
+    # Should have 4 sentence boundaries (level 1)
+    level_1 = positions.level_enums[1]
+    num_sentence_boundaries = torch.sum(level_1 > 0).item()
+    assert num_sentence_boundaries == 4, "Should have 4 sentence boundaries"
+
+    # Should have 2 section boundaries (level 2)
+    level_2 = positions.level_enums[2]
+    num_section_boundaries = torch.sum(level_2 > 0).item()
+    assert num_section_boundaries == 2, "Should have 2 section boundaries"
 
 
 def test_coordinate_assignment_correctness(tokenizer):
-    """Test that coordinate assignment follows the hierarchy rules."""
+    """Test that enumeration assignment follows the hierarchy rules."""
     document = [["First sentence", "Second sentence"], ["Third sentence"]]
 
-    input_ids, coords = build_coords_from_nested_list(document, tokenizer)
+    input_ids, positions = build_coords_from_nested_list(document, tokenizer)
 
-    # Manually compute expected structure
-    # Section 0: sentences 0, 1
-    # Section 1: sentence 2
+    # Expected structure:
+    # Section 0: sentences 1, 2 (at end of each sentence)
+    # Section 1: sentence 3 (at end)
 
-    # Find token boundaries by checking where logical_time changes
-    times = coords.logical_times.tolist()
+    level_1 = positions.level_enums[1]
+    level_2 = positions.level_enums[2]
 
-    # All tokens of first sentence should have time=0
-    first_sent_end = times.index(1) if 1 in times else len(times)
-    assert all(
-        t == 0 for t in times[:first_sent_end]
-    ), "First sentence tokens should have x=0"
+    # Should have 3 sentence boundaries
+    num_sentence_boundaries = torch.sum(level_1 > 0).item()
+    assert num_sentence_boundaries == 3, "Should have 3 sentence boundaries"
 
-    # Tokens of second sentence should have time=1
-    if 1 in times:
-        second_sent_start = first_sent_end
-        second_sent_end = times.index(2) if 2 in times else len(times)
-        assert all(
-            t == 1 for t in times[second_sent_start:second_sent_end]
-        ), "Second sentence tokens should have x=1"
+    # Should have 2 section boundaries
+    num_section_boundaries = torch.sum(level_2 > 0).item()
+    assert num_section_boundaries == 2, "Should have 2 section boundaries"
+
+    # Section boundaries should be at sentence boundaries
+    section_boundary_indices = (level_2 > 0).nonzero(as_tuple=True)[0]
+    for idx in section_boundary_indices:
+        assert level_1[idx] > 0, "Section boundaries should also be sentence boundaries"
 
 
 def test_max_length_truncation(tokenizer):
@@ -104,64 +124,69 @@ def test_max_length_truncation(tokenizer):
     document = [[long_sentence, long_sentence, long_sentence]]
 
     max_length = 50
-    input_ids, coords = build_coords_from_nested_list(
+    input_ids, positions = build_coords_from_nested_list(
         document, tokenizer, max_length=max_length
     )
 
     # Should be truncated to max_length
     assert len(input_ids) <= max_length, f"Should be truncated to {max_length}"
-    assert len(coords.levels) == len(input_ids), "Coords should match truncated length"
+    assert len(positions.level_enums[0]) == len(
+        input_ids
+    ), "Positions should match truncated length"
 
 
 def test_empty_sentence_handling(tokenizer):
     """Test handling of empty strings in document."""
     document = [["Hello", "", "World"]]
 
-    input_ids, coords = build_coords_from_nested_list(document, tokenizer)
+    input_ids, positions = build_coords_from_nested_list(document, tokenizer)
 
     # Empty strings should be skipped but not crash
     assert len(input_ids) > 0, "Should have tokens from non-empty sentences"
 
 
-def test_parent_child_distance_tokens_to_sentences(tokenizer):
-    """Verify tokens are assigned to correct sentences via logical_time."""
+def test_hierarchical_enumeration(tokenizer):
+    """Verify hierarchical enumeration is correct."""
     document = [["Hello world", "How are you"]]
 
-    input_ids, coords = build_coords_from_nested_list(document, tokenizer)
+    input_ids, positions = build_coords_from_nested_list(document, tokenizer)
 
-    # All elements are tokens at level 0 (no separate sentence/section tokens)
-    assert torch.all(coords.levels == 0), "All coordinates should be for tokens"
+    # Level 0: all tokens should have sequential enumeration
+    level_0 = positions.level_enums[0]
+    assert len(level_0) == len(
+        input_ids
+    ), "All positions should be enumerated at level 0"
+    assert torch.all(level_0 > 0), "All level 0 enumerations should be positive"
 
-    # Tokens in first sentence have logical_time=0, in second have logical_time=1
-    times = coords.logical_times.tolist()
-
-    # Verify at least two different sentence IDs (logical_times)
-    assert max(times) >= 1, "Should have at least 2 different sentence IDs"
+    # Level 1: should have 2 sentence boundaries
+    level_1 = positions.level_enums[1]
+    num_sentence_boundaries = torch.sum(level_1 > 0).item()
+    assert num_sentence_boundaries == 2, "Should have 2 sentence boundaries"
 
 
 def test_device_placement(tokenizer):
-    """Test that coordinates are placed on correct device."""
+    """Test that positions are placed on correct device."""
     document = [["Hello world"]]
 
     # Test CPU
-    input_ids, coords = build_coords_from_nested_list(
+    input_ids, positions = build_coords_from_nested_list(
         document, tokenizer, device=torch.device("cpu")
     )
-    assert coords.levels.device.type == "cpu"
+    assert positions.level_enums[0].device.type == "cpu"
 
     # Test CUDA if available
     if torch.cuda.is_available():
-        input_ids, coords = build_coords_from_nested_list(
+        input_ids, positions = build_coords_from_nested_list(
             document, tokenizer, device=torch.device("cuda")
         )
-        assert coords.levels.device.type == "cuda"
+        assert positions.level_enums[0].device.type == "cuda"
 
 
 def test_tokenization_without_special_tokens(tokenizer):
     """Verify that tokenization doesn't add [CLS] or [SEP] tokens."""
     document = [["Hello"]]
 
-    input_ids, coords = build_coords_from_nested_list(document, tokenizer)
+    input_ids, positions = build_coords_from_nested_list(document, tokenizer)
 
     # Should not have [CLS] (101) or [SEP] (102) tokens for BERT
     assert 101 not in input_ids, "Should not have [CLS] token"
@@ -176,24 +201,25 @@ def test_varying_section_sizes(tokenizer):
         ["Single"],
     ]
 
-    input_ids, coords = build_coords_from_nested_list(document, tokenizer)
+    input_ids, positions = build_coords_from_nested_list(document, tokenizer)
 
-    # Should have 6 sentences total
-    unique_times = torch.unique(coords.logical_times)
-    assert len(unique_times) == 6, "Should have 6 sentence IDs"
+    # Should have 6 sentence boundaries total (level 1)
+    level_1 = positions.level_enums[1]
+    num_sentence_boundaries = torch.sum(level_1 > 0).item()
+    assert num_sentence_boundaries == 6, "Should have 6 sentence boundaries"
 
 
-def test_coordinate_consistency(tokenizer):
-    """Test that coordinate tensors have consistent lengths."""
+def test_position_consistency(tokenizer):
+    """Test that position tensors have consistent lengths."""
     document = [["Hello world", "Test sentence"], ["Another section"]]
 
-    input_ids, coords = build_coords_from_nested_list(document, tokenizer)
+    input_ids, positions = build_coords_from_nested_list(document, tokenizer)
 
-    # All coordinate tensors should have same length
-    assert len(coords.levels) == len(coords.logical_times)
-    assert len(coords.levels) == len(coords.physical_positions)
-    # Coords should match input_ids (one coordinate per token)
-    assert len(coords.levels) == len(input_ids)
+    # All level enumeration tensors should have same length
+    for i in range(positions.num_levels):
+        assert len(positions.level_enums[i]) == len(
+            input_ids
+        ), f"Level {i} should match input_ids length"
 
 
 if __name__ == "__main__":

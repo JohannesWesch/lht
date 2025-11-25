@@ -1,29 +1,15 @@
 """
-Utilities for geometric attention - convenience and debugging helpers.
+Utilities for Multi-Level Sliding Window Attention (ML-SWA).
 
 This module contains optional helpers:
-- Convenience coordinate builders (two_level, three_level)
-- Verification functions
-- Visualization functions
-- Full encoder with embeddings
+- Nested document builder (build_coords_from_nested_list)
+- Seeding utilities
 """
 
-from .coord_builders import (
-    build_flat_coords,
-    build_three_level_coords,
-    build_two_level_coords,
-)
-from .full_encoder import GeometricLHTEncoder
+from .nested_builder import build_coords_from_nested_list
 from .seeding import set_seed
-from .verification import verify_parent_child_distances
-from .visualization import visualize_coords
 
 __all__ = [
-    "build_two_level_coords",
-    "build_three_level_coords",
-    "build_flat_coords",
-    "verify_parent_child_distances",
-    "visualize_coords",
-    "GeometricLHTEncoder",
+    "build_coords_from_nested_list",
     "set_seed",
 ]

@@ -1,20 +1,18 @@
 """
-Core geometric attention functionality - essentials only.
+Core Multi-Level Sliding Window Attention (ML-SWA) - essentials only.
 
-This module contains the minimal implementation (~150 lines total):
-- GeometricCoordinates: coordinate representation
-- geometric_attention(): the attention function
-- build_coords(): universal coordinate builder
+This module contains the minimal implementation:
+- HierarchicalPositions: sparse enumeration vectors per level
+- mlswa_attention(): cascading per-level attention function
+- create_hierarchical_mask(): vectorized mask creation
 """
 
-from .attention import GeometricCoordinates, create_geometric_mask, geometric_attention
-from .coords import build_coords
-from .model import GeometricTransformerBlock
+from .attention import HierarchicalPositions, create_hierarchical_mask, mlswa_attention
+from .model import MLSWATransformerBlock
 
 __all__ = [
-    "GeometricCoordinates",
-    "create_geometric_mask",
-    "geometric_attention",
-    "build_coords",
-    "GeometricTransformerBlock",
+    "HierarchicalPositions",
+    "create_hierarchical_mask",
+    "mlswa_attention",
+    "MLSWATransformerBlock",
 ]

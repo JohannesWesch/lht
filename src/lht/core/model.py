@@ -1,22 +1,22 @@
 """
-Core transformer block with geometric attention.
+Core transformer block with Multi-Level Sliding Window Attention (ML-SWA).
 
 Optional: only needed if you want a complete transformer block.
-If integrating into existing model, just use geometric_attention() directly.
+If integrating into existing model, just use mlswa_attention() directly.
 """
 
 import torch
 import torch.nn as nn
 
-from .attention import GeometricCoordinates, geometric_attention
+from .attention import HierarchicalPositions, mlswa_attention
 
 
-class GeometricTransformerBlock(nn.Module):
+class MLSWATransformerBlock(nn.Module):
     """
-    Transformer block with geometric attention.
+    Transformer block with Multi-Level Sliding Window Attention (ML-SWA).
 
-    Standard transformer architecture, but uses geometric_attention()
-    instead of regular attention.
+    Standard transformer architecture, but uses mlswa_attention()
+    with hierarchical positions instead of regular attention.
 
     Supports per-layer hierarchy level control via max_level parameter.
     """
@@ -27,7 +27,6 @@ class GeometricTransformerBlock(nn.Module):
         n_heads: int,
         d_ff: int,
         dropout: float = 0.1,
-        manhattan_radius: int = 1,
         layer_idx: int = None,
         layer_max_level: int = None,
         window_size_per_level: list = None,
@@ -38,10 +37,9 @@ class GeometricTransformerBlock(nn.Module):
         self.d_model = d_model
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
-        self.manhattan_radius = manhattan_radius  # geometric parent-child (usually 1)
         self.layer_idx = layer_idx
         self.layer_max_level = layer_max_level
-        self.window_size_per_level = window_size_per_level  # [512, 64, 16]
+        self.window_size_per_level = window_size_per_level  # [256, 64, 16]
 
         self.qkv = nn.Linear(d_model, 3 * d_model)
         self.out_proj = nn.Linear(d_model, d_model)
@@ -60,17 +58,17 @@ class GeometricTransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,  # [B, N, D]
-        coords: GeometricCoordinates,  # 2D coordinates
+        positions: HierarchicalPositions,  # Hierarchical enumeration vectors
         max_level: int = None,  # Override layer_max_level if provided
         window_size_per_level: list = None,  # Override self.window_size_per_level if provided
     ) -> torch.Tensor:
-        """Forward pass with geometric attention.
+        """Forward pass with cascading per-level sliding window attention.
 
         Args:
             x: Input tensor [B, N, D]
-            coords: Geometric coordinates for all tokens
+            positions: HierarchicalPositions with sparse enumeration vectors
             max_level: Max hierarchy level for this layer (overrides self.layer_max_level)
-            window_size_per_level: Window sizes [512, 64, 16] (overrides self.window_size_per_level)
+            window_size_per_level: Window sizes [256, 64, 16] (overrides self.window_size_per_level)
         """
         # Self-attention
         residual = x
@@ -93,15 +91,14 @@ class GeometricTransformerBlock(nn.Module):
             else self.window_size_per_level
         )
 
-        # Geometric attention with per-layer level control
-        attn_out = geometric_attention(
+        # Multi-level sliding window attention with per-layer level control
+        attn_out = mlswa_attention(
             q,
             k,
             v,
-            coords,
-            radius=self.manhattan_radius,
-            max_level=effective_max_level,
+            positions,
             window_size_per_level=effective_windows,
+            max_level=effective_max_level,
         )
 
         attn_out = attn_out.reshape(B, N, self.d_model)

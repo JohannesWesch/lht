@@ -56,6 +56,13 @@ class HierarchicalDataCollator(DataCollatorForLanguageModeling):
 
         batch = super().torch_call([{"input_ids": t} for t in batch_input_ids_padded])
 
+        # Ensure [DOC] token (position 0) is never masked
+        # Restore original [CLS] token at position 0 for all examples in batch
+        if "input_ids" in batch and "labels" in batch:
+            batch["input_ids"][:, 0] = self.tokenizer.cls_token_id
+            # Set label to -100 (ignore) for [DOC] token
+            batch["labels"][:, 0] = -100
+
         max_len = batch_input_ids_padded.size(1)
 
         from lht.core.attention import HierarchicalPositions

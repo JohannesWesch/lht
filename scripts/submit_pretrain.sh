@@ -4,7 +4,7 @@
 #   sbatch scripts/submit_pretrain.sh
 #
 #SBATCH --job-name=lht-pretrain
-#SBATCH --partition=gpu_h100_il
+#SBATCH --partition=gpu_a100_il
 #SBATCH --mem=128000mb
 #SBATCH --time=24:00:00
 #SBATCH --nodes=1

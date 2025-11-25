@@ -65,7 +65,7 @@ def train_lht_pretrain(config_path: str, resume_from: str = None):
 
     # Initialize DataModule
     print("Initializing Data Module...")
-    if cfg.model.geometry:  # Check if using hierarchical model
+    if cfg.model.mlswa:  # Check if using hierarchical model
         data_module = HierarchicalMLMDataModule(cfg)
     else:
         data_module = MLMDataModule(cfg)

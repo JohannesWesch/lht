@@ -1,7 +1,7 @@
 """
-Test suite for sliding window mechanism.
+Test suite for Multi-Level Sliding Window Attention (ML-SWA).
 
-Tests per-level window constraints, interaction with Manhattan distance,
+Tests per-level cascading window constraints, sparse enumeration,
 and edge cases for window boundaries.
 
 Tests use mocking to run on CPU.
@@ -13,312 +13,235 @@ import pytest
 import torch
 
 from lht.core.attention import (
-    GeometricCoordinates,
-    create_geometric_mask,
-    geometric_attention,
+    HierarchicalPositions,
+    create_hierarchical_mask,
+    mlswa_attention,
 )
 
 
-def test_same_level_within_window():
-    """Test that tokens within window at same level can attend."""
-    # Create tokens at same level but different logical times
+def test_level_0_window():
+    """Test that all tokens within window at level 0 can attend."""
+    # Create simple positions: all tokens at level 0
     seq_len = 10
-    levels = torch.zeros(seq_len, dtype=torch.long)  # All at level 0
-    logical_times = torch.arange(seq_len, dtype=torch.long)  # Sequential times
-    coords = GeometricCoordinates(levels, logical_times)
+    level_0 = torch.arange(1, seq_len + 1, dtype=torch.long)  # 1, 2, 3, ..., 10
+    level_1 = torch.zeros(seq_len, dtype=torch.long)  # No boundaries
+    positions = HierarchicalPositions([level_0, level_1])
 
-    window_sizes = [5, 64, 16]  # Window of 5 for level 0
+    window_sizes = [3, 1]  # Window of 3 for level 0
 
-    # Token at time=0 should attend to tokens 0-5 (within window)
-    # Token at time=7 should NOT attend to token 0 (distance=7, window=5)
-
+    # Token at enum=5 should attend to tokens 2-8 (within ±3 distance)
     with patch("lht.core.attention.create_block_mask") as mock_create_block_mask:
         mock_create_block_mask.return_value = MagicMock()
 
-        mask = create_geometric_mask(
-            coords=coords,
-            radius=1,
+        mask = create_hierarchical_mask(
+            positions=positions,
             window_size_per_level=window_sizes,
             batch_size=1,
             num_heads=1,
         )
 
     assert mask is not None, "Mask should be created"
-
-    # Verify create_block_mask was called with correct parameters
     assert mock_create_block_mask.called, "create_block_mask should be called"
-    call_kwargs = mock_create_block_mask.call_args[1]
-    assert call_kwargs["Q_LEN"] == seq_len, f"Q_LEN should be {seq_len}"
-    assert call_kwargs["KV_LEN"] == seq_len, f"KV_LEN should be {seq_len}"
-
-    # Verify window_size_per_level was passed through
-    # The mask function should have access to window constraints
 
 
-def test_same_level_outside_window():
-    """Test that tokens outside window at same level cannot attend."""
-    # Create many tokens at same level with large time differences
-    seq_len = 100
-    levels = torch.zeros(seq_len, dtype=torch.long)
-    logical_times = torch.arange(seq_len, dtype=torch.long)
-    coords = GeometricCoordinates(levels, logical_times)
+def test_sparse_enumeration_level_1():
+    """Test that only boundary positions participate in level 1."""
+    seq_len = 10
+    level_0 = torch.arange(1, seq_len + 1, dtype=torch.long)
+    level_1 = torch.zeros(seq_len, dtype=torch.long)
+    level_1[3] = 1  # Boundary at position 3
+    level_1[7] = 2  # Boundary at position 7
+    positions = HierarchicalPositions([level_0, level_1])
 
-    window_sizes = [10, 64, 16]  # Small window of 10
+    # Verify sparse participation
+    assert (level_1 > 0).sum() == 2, "Only 2 positions should participate in level 1"
+
+
+def test_cascading_windows():
+    """Test that cascading windows work (OR merge)."""
+    seq_len = 8
+    level_0 = torch.arange(1, seq_len + 1, dtype=torch.long)
+    level_1 = torch.tensor([1, 0, 0, 2, 0, 0, 3, 0], dtype=torch.long)
+    positions = HierarchicalPositions([level_0, level_1])
+
+    window_sizes = [2, 1]  # Tight windows for both levels
 
     with patch("lht.core.attention.create_block_mask") as mock_create_block_mask:
         mock_create_block_mask.return_value = MagicMock()
 
-        mask = create_geometric_mask(
-            coords=coords,
-            radius=1,
+        mask = create_hierarchical_mask(
+            positions=positions,
             window_size_per_level=window_sizes,
             batch_size=1,
             num_heads=1,
         )
 
-    # Mask should be created (actual attention blocking tested implicitly)
-    assert mask is not None, "Mask should be created even with large sequence"
-
-    # Verify mask was created with correct sequence length
-    assert mock_create_block_mask.called, "create_block_mask should be called"
-    call_kwargs = mock_create_block_mask.call_args[1]
-    assert call_kwargs["Q_LEN"] == seq_len, f"Q_LEN should be {seq_len}"
-    assert call_kwargs["KV_LEN"] == seq_len, f"KV_LEN should be {seq_len}"
-
-
-def test_cross_level_ignores_window():
-    """Test that window constraint doesn't apply to cross-level attention."""
-    # Token at (x=0, y=0) and sentence at (x=0, y=1)
-    levels = torch.tensor([0, 1], dtype=torch.long)
-    logical_times = torch.tensor([0, 0], dtype=torch.long)
-    coords = GeometricCoordinates(levels, logical_times)
-
-    window_sizes = [1, 64, 16]  # Very small window at level 0
-
-    # Cross-level attention should still work (Manhattan distance = 1)
-    with patch("lht.core.attention.create_block_mask") as mock_create_block_mask:
-
-        mock_create_block_mask.return_value = MagicMock()
-
-        mask = create_geometric_mask(
-            coords=coords,
-            radius=1,
-            window_size_per_level=window_sizes,
-            batch_size=1,
-            num_heads=1,
-        )
-
+    # All positions get level 0 window
+    # Positions 0, 3, 6 additionally get level 1 window
     assert mask is not None
 
 
-def test_window_size_per_level():
-    """Test different window sizes for different levels."""
-    # Create 3-level hierarchy
-    levels = torch.tensor([0, 0, 0, 1, 1, 2], dtype=torch.long)
-    logical_times = torch.tensor([0, 0, 0, 0, 1, 0], dtype=torch.long)
-    coords = GeometricCoordinates(levels, logical_times)
-
-    window_sizes = [256, 64, 16]  # Different sizes for each level
-
-    with patch("lht.core.attention.create_block_mask") as mock_create_block_mask:
-
-        mock_create_block_mask.return_value = MagicMock()
-
-        mask = create_geometric_mask(
-            coords=coords,
-            radius=1,
-            window_size_per_level=window_sizes,
-            batch_size=1,
-            num_heads=2,
-        )
-
-    assert mask is not None
-
-
-def test_window_with_manhattan_radius():
-    """Test combined Manhattan distance and window constraints."""
-    # Tokens at same level within window
-    seq_len = 20
-    levels = torch.zeros(seq_len, dtype=torch.long)
-    logical_times = torch.arange(seq_len, dtype=torch.long)
-    coords = GeometricCoordinates(levels, logical_times)
-
-    # Both radius and window apply
-    with patch("lht.core.attention.create_block_mask") as mock_create_block_mask:
-
-        mock_create_block_mask.return_value = MagicMock()
-
-        mask = create_geometric_mask(
-            coords=coords,
-            radius=1,  # Manhattan constraint
-            window_size_per_level=[10, 64, 16],  # Window constraint
-            batch_size=1,
-            num_heads=2,
-        )
-
-    assert mask is not None
-
-
-def test_window_boundary_exact():
-    """Test behavior at exact window boundary."""
-    # Token at time=0, token at time=window_size
-    window_size = 10
-    seq_len = window_size + 1
-
-    levels = torch.zeros(seq_len, dtype=torch.long)
-    logical_times = torch.arange(seq_len, dtype=torch.long)
-    coords = GeometricCoordinates(levels, logical_times)
-
-    window_sizes = [window_size, 64, 16]
-
-    with patch("lht.core.attention.create_block_mask") as mock_create_block_mask:
-
-        mock_create_block_mask.return_value = MagicMock()
-
-        mask = create_geometric_mask(
-            coords=coords,
-            radius=1,
-            window_size_per_level=window_sizes,
-            batch_size=1,
-            num_heads=1,
-        )
-
-    assert mask is not None
-
-
-def test_large_window_no_restriction():
-    """Test that very large window effectively allows all same-level attention."""
-    seq_len = 50
-    levels = torch.zeros(seq_len, dtype=torch.long)
-    logical_times = torch.arange(seq_len, dtype=torch.long)
-    coords = GeometricCoordinates(levels, logical_times)
-
-    window_sizes = [1000, 1000, 1000]  # Very large windows
-
-    with patch("lht.core.attention.create_block_mask") as mock_create_block_mask:
-
-        mock_create_block_mask.return_value = MagicMock()
-
-        mask = create_geometric_mask(
-            coords=coords,
-            radius=1,
-            window_size_per_level=window_sizes,
-            batch_size=1,
-            num_heads=1,
-        )
-
-    assert mask is not None
-
-
-def test_window_with_batched_coords():
-    """Test window constraints with batched coordinates."""
-    batch_size = 2
-    seq_len = 20
-
-    levels = torch.zeros(batch_size, seq_len, dtype=torch.long)
-    logical_times = torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1)
-    coords = GeometricCoordinates(levels, logical_times)
-
-    window_sizes = [10, 64, 16]
-
-    with patch("lht.core.attention.create_block_mask") as mock_create_block_mask:
-
-        mock_create_block_mask.return_value = MagicMock()
-
-        mask = create_geometric_mask(
-            coords=coords,
-            radius=1,
-            window_size_per_level=window_sizes,
-            batch_size=batch_size,
-            num_heads=2,
-        )
-
-    assert mask is not None
-
-
-def test_window_attention_integration():
-    """Test full attention with window constraints."""
-    batch_size = 1
-    seq_len = 16
-    num_heads = 2
-    head_dim = 8
-
-    query = torch.randn(batch_size, seq_len, num_heads, head_dim)
-    key = torch.randn(batch_size, seq_len, num_heads, head_dim)
-    value = torch.randn(batch_size, seq_len, num_heads, head_dim)
-
-    levels = torch.zeros(batch_size, seq_len, dtype=torch.long)
-    logical_times = torch.arange(seq_len).unsqueeze(0)
-    coords = GeometricCoordinates(levels, logical_times)
-
-    window_sizes = [8, 64, 16]
-
-    with patch("lht.core.attention._compiled_flex_attention") as mock_flex_attn:
-        # Mock returns [B, H, N, D] which gets transposed back to [B, N, H, D]
-        mock_output = torch.randn(batch_size, num_heads, seq_len, head_dim)
-        mock_flex_attn.return_value = mock_output
-
-        with patch("lht.core.attention.create_geometric_mask") as mock_create_mask:
-            mock_create_mask.return_value = MagicMock()
-
-            output = geometric_attention(
-                query, key, value, coords, radius=1, window_size_per_level=window_sizes
-            )
-
-    assert output.shape == (batch_size, seq_len, num_heads, head_dim)
-    assert not torch.isnan(output).any()
-
-
-def test_hierarchical_with_windows():
-    """Test window constraints on hierarchical structure."""
-    # Mix of tokens, sentences, sections with windows
-    batch_size = 1
-    # 6 tokens in 2 sentences in 1 section
+def test_max_level_constraint():
+    """Test that max_level limits active hierarchy levels."""
     seq_len = 6
+    level_0 = torch.arange(1, seq_len + 1, dtype=torch.long)
+    level_1 = torch.tensor([1, 0, 2, 0, 3, 0], dtype=torch.long)
+    level_2 = torch.tensor([1, 0, 0, 0, 0, 2], dtype=torch.long)
+    positions = HierarchicalPositions([level_0, level_1, level_2])
 
-    query = torch.randn(batch_size, seq_len, 2, 8)
-    key = torch.randn(batch_size, seq_len, 2, 8)
-    value = torch.randn(batch_size, seq_len, 2, 8)
+    window_sizes = [2, 1, 1]
 
-    # All tokens at level 0, split into 2 groups
-    levels = torch.zeros(batch_size, seq_len, dtype=torch.long)
-    logical_times = torch.tensor([[0, 0, 0, 1, 1, 1]], dtype=torch.long)
-    coords = GeometricCoordinates(levels, logical_times)
+    with patch("lht.core.attention.create_block_mask") as mock_create_block_mask:
+        mock_create_block_mask.return_value = MagicMock()
 
-    window_sizes = [256, 64, 16]
+        # Only use first 2 levels
+        mask = create_hierarchical_mask(
+            positions=positions,
+            window_size_per_level=window_sizes,
+            max_level=1,  # Only use levels 0 and 1
+            batch_size=1,
+            num_heads=1,
+        )
 
-    with patch("lht.core.attention._compiled_flex_attention") as mock_flex_attn:
-        # Mock returns [B, H, N, D] which gets transposed back to [B, N, H, D]
-        mock_output = torch.randn(batch_size, query.shape[2], seq_len, query.shape[3])
-        mock_flex_attn.return_value = mock_output
+    assert mock_create_block_mask.called
 
-        with patch("lht.core.attention.create_geometric_mask") as mock_create_mask:
-            mock_create_mask.return_value = MagicMock()
 
-            output = geometric_attention(
-                query, key, value, coords, radius=1, window_size_per_level=window_sizes
+def test_batched_positions():
+    """Test sliding windows with batched positions."""
+    B, N = 2, 5
+    level_0 = torch.arange(1, N + 1, dtype=torch.long).unsqueeze(0).expand(B, -1)
+    level_1 = torch.zeros(B, N, dtype=torch.long)
+    level_1[:, -1] = 1  # Last position is boundary in both batch items
+    positions = HierarchicalPositions([level_0, level_1])
+
+    window_sizes = [2, 1]
+
+    with patch("lht.core.attention.create_block_mask") as mock_create_block_mask:
+        mock_create_block_mask.return_value = MagicMock()
+
+        mask = create_hierarchical_mask(
+            positions=positions,
+            window_size_per_level=window_sizes,
+            batch_size=B,
+            num_heads=2,
+        )
+
+    call_kwargs = mock_create_block_mask.call_args[1]
+    assert call_kwargs["B"] == B
+    assert call_kwargs["Q_LEN"] == N
+    assert call_kwargs["KV_LEN"] == N
+
+
+def test_zero_means_non_participant():
+    """Test that zero enumeration values mean non-participation."""
+    seq_len = 6
+    level_0 = torch.arange(1, seq_len + 1, dtype=torch.long)
+    level_1 = torch.tensor(
+        [1, 0, 0, 2, 0, 0], dtype=torch.long
+    )  # Only positions 0 and 3 participate
+    positions = HierarchicalPositions([level_0, level_1])
+
+    # Verify participation
+    participating = level_1 > 0
+    assert participating.sum() == 2
+    assert participating[0] == True
+    assert participating[3] == True
+    assert participating[1] == False
+
+
+def test_window_distance_in_enumeration_space():
+    """Test that window distance is measured in enumeration space."""
+    # Level 1: enumerations 1, 0, 0, 2, 0, 3
+    # Positions 0, 3, 5 participate with enums 1, 2, 3
+    # With window=1, enum 2 should attend to enums 1 and 3 (distance ≤ 1)
+    seq_len = 6
+    level_0 = torch.arange(1, seq_len + 1, dtype=torch.long)
+    level_1 = torch.tensor([1, 0, 0, 2, 0, 3], dtype=torch.long)
+    positions = HierarchicalPositions([level_0, level_1])
+
+    # Enum 2 at position 3 should see:
+    # - Enum 1 at position 0 (|2-1| = 1 ≤ window)
+    # - Enum 3 at position 5 (|2-3| = 1 ≤ window)
+
+    window_sizes = [2, 1]  # Window of 1 for level 1
+
+    with patch("lht.core.attention.create_block_mask") as mock_create_block_mask:
+        mock_create_block_mask.return_value = MagicMock()
+
+        mask = create_hierarchical_mask(
+            positions=positions,
+            window_size_per_level=window_sizes,
+            batch_size=1,
+            num_heads=1,
+        )
+
+    assert mask is not None
+
+
+def test_mlswa_attention_with_windows():
+    """Test mlswa_attention integrates with windowing."""
+    B, N, H, D = 1, 6, 2, 4
+    query = torch.randn(B, N, H, D)
+    key = torch.randn(B, N, H, D)
+    value = torch.randn(B, N, H, D)
+
+    level_0 = torch.arange(1, N + 1, dtype=torch.long)
+    level_1 = torch.tensor([1, 0, 2, 0, 3, 0], dtype=torch.long)
+    positions = HierarchicalPositions([level_0, level_1])
+
+    window_sizes = [3, 1]
+
+    with patch("lht.core.attention.create_hierarchical_mask") as mock_create_mask:
+        mock_create_mask.return_value = MagicMock()
+
+        with patch("lht.core.attention._compiled_mlswa_attention") as mock_flex_attn:
+            mock_flex_attn.return_value = torch.randn(B, H, N, D)
+
+            output = mlswa_attention(
+                query, key, value, positions, window_size_per_level=window_sizes
             )
 
-    assert output.shape == query.shape
+    assert output.shape == (B, N, H, D)
+    assert mock_flex_attn.called
 
 
-def test_window_zero_size():
-    """Test edge case with window size of 0."""
-    seq_len = 4
-    levels = torch.zeros(seq_len, dtype=torch.long)
-    logical_times = torch.arange(seq_len, dtype=torch.long)
-    coords = GeometricCoordinates(levels, logical_times)
+def test_empty_level_1():
+    """Test handling when level 1 has no participants."""
+    seq_len = 5
+    level_0 = torch.arange(1, seq_len + 1, dtype=torch.long)
+    level_1 = torch.zeros(seq_len, dtype=torch.long)  # No participants
+    positions = HierarchicalPositions([level_0, level_1])
 
-    window_sizes = [0, 64, 16]  # Zero window at level 0
+    window_sizes = [2, 1]
 
-    # Should still create mask (tokens can't attend to distant same-level tokens)
     with patch("lht.core.attention.create_block_mask") as mock_create_block_mask:
-
         mock_create_block_mask.return_value = MagicMock()
 
-        mask = create_geometric_mask(
-            coords=coords,
-            radius=1,
+        mask = create_hierarchical_mask(
+            positions=positions,
+            window_size_per_level=window_sizes,
+            batch_size=1,
+            num_heads=1,
+        )
+
+    # Should still work - only level 0 window will apply
+    assert mask is not None
+
+
+def test_large_window_covers_all():
+    """Test that very large window allows all positions to attend."""
+    seq_len = 10
+    level_0 = torch.arange(1, seq_len + 1, dtype=torch.long)
+    level_1 = torch.zeros(seq_len, dtype=torch.long)
+    positions = HierarchicalPositions([level_0, level_1])
+
+    window_sizes = [100, 100]  # Very large windows
+
+    with patch("lht.core.attention.create_block_mask") as mock_create_block_mask:
+        mock_create_block_mask.return_value = MagicMock()
+
+        mask = create_hierarchical_mask(
+            positions=positions,
             window_size_per_level=window_sizes,
             batch_size=1,
             num_heads=1,
@@ -327,73 +250,19 @@ def test_window_zero_size():
     assert mask is not None
 
 
-def test_window_none():
-    """Test that window=None allows unrestricted same-level attention."""
-    seq_len = 10
-    levels = torch.zeros(seq_len, dtype=torch.long)
-    logical_times = torch.arange(seq_len, dtype=torch.long)
-    coords = GeometricCoordinates(levels, logical_times)
+def test_single_level():
+    """Test with only level 0 (single level hierarchy)."""
+    seq_len = 5
+    level_0 = torch.arange(1, seq_len + 1, dtype=torch.long)
+    positions = HierarchicalPositions([level_0])
 
-    # No window constraint
-    with patch("lht.core.attention.create_block_mask") as mock_create_block_mask:
-
-        mock_create_block_mask.return_value = MagicMock()
-
-        mask = create_geometric_mask(
-            coords=coords,
-            radius=1,
-            window_size_per_level=None,
-            batch_size=1,
-            num_heads=1,
-        )
-
-    assert mask is not None
-
-
-def test_level_specific_windows():
-    """Test that level 1 and level 2 have different window behaviors."""
-    # Create multi-level structure
-    levels = torch.tensor([0, 0, 0, 1, 1, 1, 2, 2], dtype=torch.long)
-    logical_times = torch.arange(8, dtype=torch.long)
-    coords = GeometricCoordinates(levels, logical_times)
-
-    # Different windows per level
-    window_sizes = [2, 4, 6]  # Increasing windows for higher levels
+    window_sizes = [2]
 
     with patch("lht.core.attention.create_block_mask") as mock_create_block_mask:
-
         mock_create_block_mask.return_value = MagicMock()
 
-        mask = create_geometric_mask(
-            coords=coords,
-            radius=1,
-            window_size_per_level=window_sizes,
-            batch_size=1,
-            num_heads=1,
-        )
-
-    assert mask is not None
-
-
-def test_window_with_same_logical_time():
-    """Test window constraint when multiple tokens have same logical_time."""
-    # Siblings (same parent) should always attend regardless of window
-    seq_len = 10
-    levels = torch.zeros(seq_len, dtype=torch.long)
-    logical_times = torch.tensor([0, 0, 0, 1, 1, 2, 2, 2, 2, 3], dtype=torch.long)
-    coords = GeometricCoordinates(levels, logical_times)
-
-    window_sizes = [1, 64, 16]  # Small window
-
-    # Tokens with same logical_time (same sentence) should attend
-    # Distance = 0, so window doesn't matter
-    with patch("lht.core.attention.create_block_mask") as mock_create_block_mask:
-
-        mock_create_block_mask.return_value = MagicMock()
-
-        mask = create_geometric_mask(
-            coords=coords,
-            radius=1,
+        mask = create_hierarchical_mask(
+            positions=positions,
             window_size_per_level=window_sizes,
             batch_size=1,
             num_heads=1,

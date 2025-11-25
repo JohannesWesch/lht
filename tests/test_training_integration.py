@@ -106,9 +106,8 @@ def test_config_loading_from_yaml():
             "dropout": 0.1,
             "max_seq_len": 512,
             "rope": True,
-            "geometry": {
+            "mlswa": {
                 "num_levels": 3,
-                "manhattan_radius": 1,
                 "window_size_per_level": [256, 64, 16],
                 "layer_max_level": [2, 2],
             },
@@ -236,9 +235,8 @@ def test_optimizer_creation():
             "d_ff": 512,
             "dropout": 0.1,
             "max_seq_len": 512,
-            "geometry": {
+            "mlswa": {
                 "num_levels": 3,
-                "manhattan_radius": 1,
                 "window_size_per_level": [256, 64, 16],
                 "layer_max_level": [2, 2],
             },
@@ -339,8 +337,8 @@ def test_loss_with_different_batch_sizes():
         assert not torch.isnan(loss), f"Loss is NaN for batch_size={batch_size}"
 
 
-def test_config_geometry_parsing():
-    """Test that geometry config is properly parsed."""
+def test_config_mlswa_parsing():
+    """Test that ML-SWA config is properly parsed."""
     config_dict = {
         "experiment_name": "test",
         "seed": 42,
@@ -353,9 +351,8 @@ def test_config_geometry_parsing():
             "d_ff": 512,
             "dropout": 0.1,
             "max_seq_len": 512,
-            "geometry": {
+            "mlswa": {
                 "num_levels": 3,
-                "manhattan_radius": 1,
                 "window_size_per_level": [256, 64, 16],
                 "layer_max_level": [2, 2],
             },
@@ -390,11 +387,10 @@ def test_config_geometry_parsing():
     try:
         config = load_config(temp_path)
 
-        assert config.model.geometry is not None
-        assert config.model.geometry.num_levels == 3
-        assert config.model.geometry.manhattan_radius == 1
-        assert config.model.geometry.window_size_per_level == [256, 64, 16]
-        assert config.model.geometry.layer_max_level == [2, 2]
+        assert config.model.mlswa is not None
+        assert config.model.mlswa.num_levels == 3
+        assert config.model.mlswa.window_size_per_level == [256, 64, 16]
+        assert config.model.mlswa.layer_max_level == [2, 2]
     finally:
         os.unlink(temp_path)
 

@@ -1,5 +1,5 @@
 """
-Test suite for LHTEncoder and GeometricTransformerBlock.
+Test suite for LHTEncoder and MLSWATransformerBlock.
 
 Tests model initialization, weight initialization, forward pass,
 output shapes, and parameter counts.
@@ -14,11 +14,11 @@ import pytest
 import torch
 import torch.nn as nn
 
-from lht.core.attention import GeometricCoordinates
-from lht.core.model import GeometricTransformerBlock
+from lht.core.attention import HierarchicalPositions
+from lht.core.model import MLSWATransformerBlock
 from lht.model import LHTEncoder
 
-# Marker for tests that require CUDA (forward passes with geometric attention)
+# Marker for tests that require CUDA (forward passes with ML-SWA)
 requires_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="FlexAttention requires CUDA"
 )
@@ -35,9 +35,8 @@ def create_test_config():
             d_ff=512,
             dropout=0.1,
             max_seq_len=512,
-            geometry=SimpleNamespace(
+            mlswa=SimpleNamespace(
                 num_levels=3,
-                manhattan_radius=1,
                 window_size_per_level=[256, 64, 16],
                 layer_max_level=[2, 2],
             ),
@@ -121,13 +120,12 @@ def test_num_layers():
 
 
 def test_geometric_transformer_block_initialization():
-    """Test GeometricTransformerBlock initialization."""
-    block = GeometricTransformerBlock(
+    """Test MLSWATransformerBlock initialization."""
+    block = MLSWATransformerBlock(
         d_model=128,
         n_heads=4,
         d_ff=512,
         dropout=0.1,
-        manhattan_radius=1,
         layer_idx=0,
         layer_max_level=2,
         window_size_per_level=[256, 64, 16],
@@ -149,22 +147,27 @@ def test_forward_pass_output_structure():
 
     input_ids = torch.randint(0, config.model.vocab_size, (batch_size, seq_len))
 
-    # Create dummy coordinates
-    levels = torch.zeros(batch_size, seq_len, dtype=torch.long)
-    logical_times = torch.zeros(batch_size, seq_len, dtype=torch.long)
-    coords = GeometricCoordinates(levels, logical_times)
+    # Create dummy hierarchical positions
+    level_0 = (
+        torch.arange(1, seq_len + 1, dtype=torch.long)
+        .unsqueeze(0)
+        .expand(batch_size, -1)
+    )
+    level_1 = torch.zeros(batch_size, seq_len, dtype=torch.long)
+    level_1[:, -1] = 1  # Mark last position as boundary
+    positions = HierarchicalPositions([level_0, level_1])
 
-    with patch("lht.core.attention._compiled_flex_attention") as mock_flex_attn:
+    with patch("lht.core.attention._compiled_mlswa_attention") as mock_flex_attn:
         # Mock flex_attention to return dummy output
         def mock_attn(q, k, v, block_mask=None):
             return torch.randn_like(q)
 
         mock_flex_attn.side_effect = mock_attn
 
-        with patch("lht.core.attention.create_geometric_mask") as mock_create_mask:
+        with patch("lht.core.attention.create_hierarchical_mask") as mock_create_mask:
             mock_create_mask.return_value = MagicMock()
 
-            output = model(input_ids, coords=coords)
+            output = model(input_ids, positions=positions)
 
             # Check output structure
             assert isinstance(output, dict), "Output should be a dict"
@@ -181,7 +184,7 @@ def test_forward_pass_output_structure():
             assert mock_flex_attn.called, "FlexAttention should have been called"
             assert (
                 mock_create_mask.called
-            ), "create_geometric_mask should have been called"
+            ), "create_hierarchical_mask should have been called"
 
 
 def test_forward_pass_output_shapes():
@@ -193,11 +196,16 @@ def test_forward_pass_output_shapes():
     seq_len = 10
 
     input_ids = torch.randint(0, config.model.vocab_size, (batch_size, seq_len))
-    levels = torch.zeros(batch_size, seq_len, dtype=torch.long)
-    logical_times = torch.zeros(batch_size, seq_len, dtype=torch.long)
-    coords = GeometricCoordinates(levels, logical_times)
+    level_0 = (
+        torch.arange(1, seq_len + 1, dtype=torch.long)
+        .unsqueeze(0)
+        .expand(batch_size, -1)
+    )
+    level_1 = torch.zeros(batch_size, seq_len, dtype=torch.long)
+    level_1[:, -1] = 1
+    positions = HierarchicalPositions([level_0, level_1])
 
-    with patch("lht.core.attention._compiled_flex_attention") as mock_flex_attn:
+    with patch("lht.core.attention._compiled_mlswa_attention") as mock_flex_attn:
         # Mock flex_attention to return correct shape
         def mock_attn(q, k, v, block_mask=None):
             # q shape: [B, N, H, D] after reshape in geometric_attention
@@ -206,10 +214,10 @@ def test_forward_pass_output_shapes():
 
         mock_flex_attn.side_effect = mock_attn
 
-        with patch("lht.core.attention.create_geometric_mask") as mock_create_mask:
+        with patch("lht.core.attention.create_hierarchical_mask") as mock_create_mask:
             mock_create_mask.return_value = MagicMock()
 
-            output = model(input_ids, coords=coords)
+            output = model(input_ids, positions=positions)
 
     # Check hidden states shape
     assert output["hidden"].shape == (
@@ -235,8 +243,8 @@ def test_forward_pass_requires_coords():
     seq_len = 10
     input_ids = torch.randint(0, config.model.vocab_size, (batch_size, seq_len))
 
-    with pytest.raises(ValueError, match="requires 'coords'"):
-        model(input_ids, coords=None)
+    with pytest.raises(ValueError, match="requires 'positions'"):
+        model(input_ids, positions=None)
 
 
 def test_model_parameter_count():
@@ -266,9 +274,8 @@ def test_full_size_model_parameter_count():
             d_ff=3072,
             dropout=0.1,
             max_seq_len=8192,
-            geometry=SimpleNamespace(
+            mlswa=SimpleNamespace(
                 num_levels=3,
-                manhattan_radius=1,
                 window_size_per_level=[256, 64, 16],
                 layer_max_level=[2] * 12,
             ),
@@ -303,12 +310,17 @@ def test_forward_pass_no_nan():
     seq_len = 10
 
     input_ids = torch.randint(0, config.model.vocab_size, (batch_size, seq_len))
-    levels = torch.zeros(batch_size, seq_len, dtype=torch.long)
-    logical_times = torch.zeros(batch_size, seq_len, dtype=torch.long)
-    coords = GeometricCoordinates(levels, logical_times)
+    level_0 = (
+        torch.arange(1, seq_len + 1, dtype=torch.long)
+        .unsqueeze(0)
+        .expand(batch_size, -1)
+    )
+    level_1 = torch.zeros(batch_size, seq_len, dtype=torch.long)
+    level_1[:, -1] = 1
+    positions = HierarchicalPositions([level_0, level_1])
 
     with torch.no_grad():
-        with patch("lht.core.attention._compiled_flex_attention") as mock_flex_attn:
+        with patch("lht.core.attention._compiled_mlswa_attention") as mock_flex_attn:
             # Mock flex_attention to return reasonable finite values
             def mock_attn(q, k, v, block_mask=None):
                 # Return finite values in reasonable range
@@ -316,10 +328,12 @@ def test_forward_pass_no_nan():
 
             mock_flex_attn.side_effect = mock_attn
 
-            with patch("lht.core.attention.create_geometric_mask") as mock_create_mask:
+            with patch(
+                "lht.core.attention.create_hierarchical_mask"
+            ) as mock_create_mask:
                 mock_create_mask.return_value = MagicMock()
 
-                output = model(input_ids, coords=coords)
+                output = model(input_ids, positions=positions)
 
     # Check for NaN values
     assert not torch.isnan(output["hidden"]).any(), "Hidden states contain NaN"
@@ -340,12 +354,17 @@ def test_forward_pass_logits_range():
     seq_len = 10
 
     input_ids = torch.randint(0, config.model.vocab_size, (batch_size, seq_len))
-    levels = torch.zeros(batch_size, seq_len, dtype=torch.long)
-    logical_times = torch.zeros(batch_size, seq_len, dtype=torch.long)
-    coords = GeometricCoordinates(levels, logical_times)
+    level_0 = (
+        torch.arange(1, seq_len + 1, dtype=torch.long)
+        .unsqueeze(0)
+        .expand(batch_size, -1)
+    )
+    level_1 = torch.zeros(batch_size, seq_len, dtype=torch.long)
+    level_1[:, -1] = 1
+    positions = HierarchicalPositions([level_0, level_1])
 
     with torch.no_grad():
-        with patch("lht.core.attention._compiled_flex_attention") as mock_flex_attn:
+        with patch("lht.core.attention._compiled_mlswa_attention") as mock_flex_attn:
             # Mock flex_attention to return normalized output
             def mock_attn(q, k, v, block_mask=None):
                 # Return normalized values to simulate post-attention output
@@ -353,10 +372,12 @@ def test_forward_pass_logits_range():
 
             mock_flex_attn.side_effect = mock_attn
 
-            with patch("lht.core.attention.create_geometric_mask") as mock_create_mask:
+            with patch(
+                "lht.core.attention.create_hierarchical_mask"
+            ) as mock_create_mask:
                 mock_create_mask.return_value = MagicMock()
 
-                output = model(input_ids, coords=coords)
+                output = model(input_ids, positions=positions)
 
     logits = output["mlm_logits"]
 
@@ -381,11 +402,16 @@ def test_gradient_flow():
     seq_len = 10
 
     input_ids = torch.randint(0, config.model.vocab_size, (batch_size, seq_len))
-    levels = torch.zeros(batch_size, seq_len, dtype=torch.long)
-    logical_times = torch.zeros(batch_size, seq_len, dtype=torch.long)
-    coords = GeometricCoordinates(levels, logical_times)
+    level_0 = (
+        torch.arange(1, seq_len + 1, dtype=torch.long)
+        .unsqueeze(0)
+        .expand(batch_size, -1)
+    )
+    level_1 = torch.zeros(batch_size, seq_len, dtype=torch.long)
+    level_1[:, -1] = 1
+    positions = HierarchicalPositions([level_0, level_1])
 
-    with patch("lht.core.attention._compiled_flex_attention") as mock_flex_attn:
+    with patch("lht.core.attention._compiled_mlswa_attention") as mock_flex_attn:
         # Mock flex_attention with gradient support
         def mock_attn_with_grad(q, k, v, block_mask=None):
             # Return a tensor that requires grad and is connected to input
@@ -396,10 +422,10 @@ def test_gradient_flow():
 
         mock_flex_attn.side_effect = mock_attn_with_grad
 
-        with patch("lht.core.attention.create_geometric_mask") as mock_create_mask:
+        with patch("lht.core.attention.create_hierarchical_mask") as mock_create_mask:
             mock_create_mask.return_value = MagicMock()
 
-            output = model(input_ids, coords=coords)
+            output = model(input_ids, positions=positions)
             loss = output["mlm_logits"].sum()
             loss.backward()
 
@@ -426,12 +452,17 @@ def test_model_eval_mode():
     batch_size = 2
     seq_len = 10
     input_ids = torch.randint(0, config.model.vocab_size, (batch_size, seq_len))
-    levels = torch.zeros(batch_size, seq_len, dtype=torch.long)
-    logical_times = torch.zeros(batch_size, seq_len, dtype=torch.long)
-    coords = GeometricCoordinates(levels, logical_times)
+    level_0 = (
+        torch.arange(1, seq_len + 1, dtype=torch.long)
+        .unsqueeze(0)
+        .expand(batch_size, -1)
+    )
+    level_1 = torch.zeros(batch_size, seq_len, dtype=torch.long)
+    level_1[:, -1] = 1
+    positions = HierarchicalPositions([level_0, level_1])
 
     with torch.no_grad():
-        with patch("lht.core.attention._compiled_flex_attention") as mock_flex_attn:
+        with patch("lht.core.attention._compiled_mlswa_attention") as mock_flex_attn:
             # Mock with deterministic output (seeded random)
             def mock_attn_deterministic(q, k, v, block_mask=None):
                 # Use same seed for both calls to ensure determinism
@@ -440,16 +471,18 @@ def test_model_eval_mode():
 
             mock_flex_attn.side_effect = mock_attn_deterministic
 
-            with patch("lht.core.attention.create_geometric_mask") as mock_create_mask:
+            with patch(
+                "lht.core.attention.create_hierarchical_mask"
+            ) as mock_create_mask:
                 mock_create_mask.return_value = MagicMock()
 
-                output1 = model(input_ids, coords=coords)
+                output1 = model(input_ids, positions=positions)
 
                 # Reset mock call count
                 mock_flex_attn.reset_mock()
                 mock_flex_attn.side_effect = mock_attn_deterministic
 
-                output2 = model(input_ids, coords=coords)
+                output2 = model(input_ids, positions=positions)
 
     # In eval mode with same input and deterministic mock, output should be identical
     assert torch.allclose(
@@ -462,12 +495,11 @@ def test_model_eval_mode():
 
 def test_geometric_transformer_block_forward():
     """Test forward pass through single transformer block (mocked attention)."""
-    block = GeometricTransformerBlock(
+    block = MLSWATransformerBlock(
         d_model=128,
         n_heads=4,
         d_ff=512,
         dropout=0.0,  # No dropout for testing
-        manhattan_radius=1,
         layer_idx=0,
     )
 
@@ -476,28 +508,33 @@ def test_geometric_transformer_block_forward():
     d_model = 128
 
     x = torch.randn(batch_size, seq_len, d_model)
-    levels = torch.zeros(batch_size, seq_len, dtype=torch.long)
-    logical_times = torch.zeros(batch_size, seq_len, dtype=torch.long)
-    coords = GeometricCoordinates(levels, logical_times)
+    level_0 = (
+        torch.arange(1, seq_len + 1, dtype=torch.long)
+        .unsqueeze(0)
+        .expand(batch_size, -1)
+    )
+    level_1 = torch.zeros(batch_size, seq_len, dtype=torch.long)
+    level_1[:, -1] = 1
+    positions = HierarchicalPositions([level_0, level_1])
 
-    with patch("lht.core.attention._compiled_flex_attention") as mock_flex_attn:
+    with patch("lht.core.attention._compiled_mlswa_attention") as mock_flex_attn:
         # Mock attention to return appropriate shape
         def mock_attn(q, k, v, block_mask=None):
             return torch.randn_like(q)
 
         mock_flex_attn.side_effect = mock_attn
 
-        with patch("lht.core.attention.create_geometric_mask") as mock_create_mask:
+        with patch("lht.core.attention.create_hierarchical_mask") as mock_create_mask:
             mock_create_mask.return_value = MagicMock()
 
-            output = block(x, coords)
+            output = block(x, positions)
 
     # Check output shape matches input (residual connection)
     assert output.shape == x.shape, f"Expected shape {x.shape}, got {output.shape}"
 
     # Verify that attention and mask creation were called
     assert mock_flex_attn.called, "FlexAttention should have been called"
-    assert mock_create_mask.called, "create_geometric_mask should have been called"
+    assert mock_create_mask.called, "create_hierarchical_mask should have been called"
 
     # Check that output is different from input (transformation occurred)
     assert not torch.allclose(
@@ -511,7 +548,7 @@ def test_layer_max_level_assignment():
     model = LHTEncoder(config)
 
     for i, layer in enumerate(model.layers):
-        expected_max_level = config.model.geometry.layer_max_level[i]
+        expected_max_level = config.model.mlswa.layer_max_level[i]
         assert layer.layer_max_level == expected_max_level
 
 
@@ -520,7 +557,7 @@ def test_window_sizes_assignment():
     config = create_test_config()
     model = LHTEncoder(config)
 
-    expected_windows = config.model.geometry.window_size_per_level
+    expected_windows = config.model.mlswa.window_size_per_level
 
     for layer in model.layers:
         assert layer.window_size_per_level == expected_windows

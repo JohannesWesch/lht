@@ -43,7 +43,7 @@ def test_single_document_batch(collator):
     # Check batch structure
     assert "input_ids" in batch
     assert "labels" in batch
-    assert "coords" in batch
+    assert "positions" in batch
 
     # Check shapes
     assert batch["input_ids"].dim() == 2  # [B, N]
@@ -76,13 +76,11 @@ def test_coordinate_padding_matches_input_ids(collator):
     batch = collator.torch_call(documents)
 
     seq_len = batch["input_ids"].shape[1]
-    coords = batch["coords"]
+    positions = batch["positions"]
 
-    # Coordinates should match sequence length
-    assert coords.levels.shape[1] == seq_len, "Levels should match seq_len"
-    assert (
-        coords.logical_times.shape[1] == seq_len
-    ), "Logical times should match seq_len"
+    # Positions should match sequence length
+    assert positions.level_enums[0].shape[1] == seq_len, "Level 0 should match seq_len"
+    assert positions.level_enums[1].shape[1] == seq_len, "Level 1 should match seq_len"
 
 
 def test_mlm_masking_percentage(collator):
@@ -142,12 +140,12 @@ def test_coordinate_batch_stacking(collator):
     documents = [[["First document"]], [["Second document"]], [["Third document"]]]
 
     batch = collator.torch_call(documents)
-    coords = batch["coords"]
+    coords = batch["positions"]
 
     # Batch dimension should match
     batch_size = 3
-    assert coords.levels.shape[0] == batch_size
-    assert coords.logical_times.shape[0] == batch_size
+    assert coords.level_enums[0].shape[0] == batch_size
+    assert coords.level_enums[1].shape[0] == batch_size
 
 
 def test_multi_section_document(collator):
@@ -160,12 +158,12 @@ def test_multi_section_document(collator):
 
     # Should process without errors
     assert "input_ids" in batch
-    assert "coords" in batch
+    assert "positions" in batch
 
-    # Coordinates should have varying logical_times
-    coords = batch["coords"]
-    unique_times = torch.unique(coords.logical_times[0])
-    assert len(unique_times) > 1, "Should have multiple sentence IDs"
+    # Positions should have varying sentence enumerations
+    positions = batch["positions"]
+    unique_enums = torch.unique(positions.level_enums[1][0])
+    assert len(unique_enums) > 1, "Should have multiple sentence IDs"
 
 
 def test_empty_batch_handling(collator):
@@ -176,7 +174,7 @@ def test_empty_batch_handling(collator):
 
     # Should still produce valid batch
     assert batch["input_ids"].shape[0] == 1
-    assert len(batch["coords"].levels) > 0
+    assert len(batch["positions"].level_enums) > 0
 
 
 def test_coordinate_truncation(collator):
@@ -191,9 +189,9 @@ def test_coordinate_truncation(collator):
 
     batch = collator_short.torch_call(documents)
 
-    # Coordinates should be truncated to match input_ids
-    assert batch["coords"].levels.shape[1] == batch["input_ids"].shape[1]
-    assert batch["coords"].levels.shape[1] <= 50
+    # Positions should be truncated to match input_ids
+    assert batch["positions"].level_enums[0].shape[1] == batch["input_ids"].shape[1]
+    assert batch["positions"].level_enums[0].shape[1] <= 50
 
 
 def test_batch_consistency(collator):
@@ -208,8 +206,8 @@ def test_batch_consistency(collator):
     # All tensors should have matching dimensions
     assert batch["input_ids"].shape == (batch_size, seq_len)
     assert batch["labels"].shape == (batch_size, seq_len)
-    assert batch["coords"].levels.shape == (batch_size, seq_len)
-    assert batch["coords"].logical_times.shape == (batch_size, seq_len)
+    assert batch["positions"].level_enums[0].shape == (batch_size, seq_len)
+    assert batch["positions"].level_enums[1].shape == (batch_size, seq_len)
 
 
 def test_mlm_original_tokens_preserved_in_labels(collator):
@@ -234,16 +232,16 @@ def test_mlm_original_tokens_preserved_in_labels(collator):
 
 
 def test_geometric_coordinates_type(collator):
-    """Test that coords is a GeometricCoordinates object."""
-    from lht.core.attention import GeometricCoordinates
+    """Test that positions is a HierarchicalPositions object."""
+    from lht.core.attention import HierarchicalPositions
 
     documents = [[["Test"]]]
 
     batch = collator.torch_call(documents)
 
     assert isinstance(
-        batch["coords"], GeometricCoordinates
-    ), "coords should be GeometricCoordinates object"
+        batch["positions"], HierarchicalPositions
+    ), "positions should be HierarchicalPositions object"
 
 
 if __name__ == "__main__":
